@@ -1,12 +1,9 @@
-import 'package:tinode/src/services/configuration.dart';
-import 'package:get_it/get_it.dart';
+import 'package:tictac/src/services/configuration.dart';
 
 class LoggerService {
   late ConfigService _configService;
 
-  LoggerService() {
-    _configService = GetIt.I.get<ConfigService>();
-  }
+  LoggerService.withConfig(this._configService);
 
   void error(String value) {
     if (_configService.loggerEnabled == true) {

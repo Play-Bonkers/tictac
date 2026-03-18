@@ -1,4 +1,4 @@
-import 'package:tinode/src/models/topic-subscription.dart';
+import 'package:tictac/src/models/topic-subscription.dart';
 
 class ContactUpdateEvent {
   final TopicSubscription contact;

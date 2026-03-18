@@ -1,21 +1,21 @@
-import 'package:get_it/get_it.dart';
 import 'package:rxdart/rxdart.dart';
 import 'dart:math';
 
-import 'package:tinode/src/models/topic-names.dart' as topic_names;
-import 'package:tinode/src/models/topic-subscription.dart';
-import 'package:tinode/src/models/topic-description.dart';
-import 'package:tinode/src/models/server-messages.dart';
-import 'package:tinode/src/services/cache-manager.dart';
-import 'package:tinode/src/models/contact-update.dart';
-import 'package:tinode/src/models/access-mode.dart';
-import 'package:tinode/src/models/credential.dart';
-import 'package:tinode/src/services/logger.dart';
-import 'package:tinode/src/services/tinode.dart';
-import 'package:tinode/src/services/tools.dart';
-import 'package:tinode/src/models/message.dart';
-import 'package:tinode/src/models/values.dart';
-import 'package:tinode/src/topic.dart';
+import 'package:tictac/src/models/topic-names.dart' as topic_names;
+import 'package:tictac/src/models/topic-subscription.dart';
+import 'package:tictac/src/models/topic-description.dart';
+import 'package:tictac/src/models/server-messages.dart';
+import 'package:tictac/src/services/cache-manager.dart';
+import 'package:tictac/src/models/contact-update.dart';
+import 'package:tictac/src/models/access-mode.dart';
+import 'package:tictac/src/models/credential.dart';
+import 'package:tictac/src/services/services.dart';
+import 'package:tictac/src/services/logger.dart';
+import 'package:tictac/src/services/tinode.dart';
+import 'package:tictac/src/services/tools.dart';
+import 'package:tictac/src/models/message.dart';
+import 'package:tictac/src/models/values.dart';
+import 'package:tictac/src/topic.dart';
 
 /// Special case of Topic for managing data of the current user, including contact list
 class TopicMe extends Topic {
@@ -40,10 +40,12 @@ class TopicMe extends Topic {
   /// Logger service, responsible for logging content in different levels
   late LoggerService _loggerService;
 
-  TopicMe() : super(topic_names.TOPIC_ME) {
-    _cacheManager = GetIt.I.get<CacheManager>();
-    _tinodeService = GetIt.I.get<TinodeService>();
-    _loggerService = GetIt.I.get<LoggerService>();
+  TopicMe({TinodeServices? services}) : super(topic_names.TOPIC_ME, services: services) {
+    if (services != null) {
+      _cacheManager = services.cacheManager;
+      _tinodeService = services.tinode;
+      _loggerService = services.logger;
+    }
   }
 
   /// Override the original Topic.processMetaDesc.

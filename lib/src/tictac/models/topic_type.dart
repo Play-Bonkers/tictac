@@ -1,0 +1,1 @@
+enum TopicType { direct, group }

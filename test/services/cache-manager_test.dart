@@ -1,28 +1,13 @@
-import 'package:get_it/get_it.dart';
 import 'package:test/test.dart';
 
-import 'package:tinode/src/models/connection-options.dart';
-import 'package:tinode/src/models/topic-subscription.dart';
-import 'package:tinode/src/services/packet-generator.dart';
-import 'package:tinode/src/services/future-manager.dart';
-import 'package:tinode/src/services/cache-manager.dart';
-import 'package:tinode/src/services/configuration.dart';
-import 'package:tinode/src/services/connection.dart';
-import 'package:tinode/src/services/logger.dart';
-import 'package:tinode/src/services/tinode.dart';
-import 'package:tinode/src/services/auth.dart';
-import 'package:tinode/src/topic.dart';
+import 'package:tictac/src/models/topic-subscription.dart';
+import 'package:tictac/src/services/cache-manager.dart';
+import 'package:tictac/src/models/connection-options.dart';
+import 'package:tictac/src/services/services.dart';
+import 'package:tictac/src/topic.dart';
 
 void main() {
-  GetIt.I.registerSingleton<ConfigService>(ConfigService(false));
-  GetIt.I.registerSingleton<LoggerService>(LoggerService());
-  GetIt.I.registerSingleton<AuthService>(AuthService());
-  GetIt.I.registerSingleton<ConnectionService>(ConnectionService(ConnectionOptions('', '')));
-  GetIt.I.registerSingleton<FutureManager>(FutureManager());
-  GetIt.I.registerSingleton<PacketGenerator>(PacketGenerator());
-  GetIt.I.registerSingleton<CacheManager>(CacheManager());
-  GetIt.I.registerSingleton<TinodeService>(TinodeService());
-
+  var services = TinodeServices(ConnectionOptions('', ''), false);
   var service = CacheManager();
 
   test('put() should put data into cache', () {
@@ -48,14 +33,14 @@ void main() {
   });
 
   test('putTopic() should put topic type data into cache', () {
-    var t = Topic('cool');
+    var t = Topic('cool', services: services);
     t.seq = 100;
     service.putTopic(t);
     expect(service.get('topic', 'cool').seq, 100);
   });
 
   test('deleteTopic() should delete topic type data from cache', () {
-    var t = Topic('cool');
+    var t = Topic('cool', services: services);
     t.seq = 100;
     service.putTopic(t);
     expect(service.get('topic', 'cool').seq, 100);
@@ -71,7 +56,7 @@ void main() {
   });
 
   test('map() should execute a function for all values in cache', () {
-    var t = Topic('cool');
+    var t = Topic('cool', services: services);
     t.isSubscribed = true;
     service.putTopic(t);
     service.map((String key, dynamic value) {

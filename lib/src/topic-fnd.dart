@@ -1,16 +1,17 @@
-import 'package:tinode/src/models/topic-names.dart' as topic_names;
-import 'package:tinode/src/models/topic-subscription.dart';
-import 'package:tinode/src/models/server-messages.dart';
-import 'package:tinode/src/models/set-params.dart';
-import 'package:tinode/src/models/message.dart';
-import 'package:tinode/src/topic.dart';
+import 'package:tictac/src/models/topic-names.dart' as topic_names;
+import 'package:tictac/src/models/topic-subscription.dart';
+import 'package:tictac/src/models/server-messages.dart';
+import 'package:tictac/src/services/services.dart';
+import 'package:tictac/src/models/set-params.dart';
+import 'package:tictac/src/models/message.dart';
+import 'package:tictac/src/topic.dart';
 
 /// special case of Topic for searching for contacts and group topics
 class TopicFnd extends Topic {
   // List of users and topics uid or topic_name -> Contact object)
   Map<String, TopicSubscription> _contacts = {};
 
-  TopicFnd() : super(topic_names.TOPIC_FND);
+  TopicFnd({TinodeServices? services}) : super(topic_names.TOPIC_FND, services: services);
 
   /// Override the original Topic.processMetaSub
   @override

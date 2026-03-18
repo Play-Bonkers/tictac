@@ -1,30 +1,30 @@
 import 'dart:convert';
 
 import 'package:rxdart/rxdart.dart';
-import 'package:get_it/get_it.dart';
 
-import 'package:tinode/src/models/packet-types.dart' as packet_types;
-import 'package:tinode/src/models/topic-names.dart' as topic_names;
-import 'package:tinode/src/services/packet-generator.dart';
-import 'package:tinode/src/models/topic-description.dart';
-import 'package:tinode/src/services/future-manager.dart';
-import 'package:tinode/src/models/server-messages.dart';
-import 'package:tinode/src/services/configuration.dart';
-import 'package:tinode/src/services/cache-manager.dart';
-import 'package:tinode/src/models/account-params.dart';
-import 'package:tinode/src/services/connection.dart';
-import 'package:tinode/src/models/packet-data.dart';
-import 'package:tinode/src/models/set-params.dart';
-import 'package:tinode/src/models/get-query.dart';
-import 'package:tinode/src/models/del-range.dart';
-import 'package:tinode/src/services/logger.dart';
-import 'package:tinode/src/models/message.dart';
-import 'package:tinode/src/services/tools.dart';
-import 'package:tinode/src/services/auth.dart';
-import 'package:tinode/src/models/packet.dart';
-import 'package:tinode/src/topic-fnd.dart';
-import 'package:tinode/src/topic-me.dart';
-import 'package:tinode/src/topic.dart';
+import 'package:tictac/src/models/packet-types.dart' as packet_types;
+import 'package:tictac/src/models/topic-names.dart' as topic_names;
+import 'package:tictac/src/services/packet-generator.dart';
+import 'package:tictac/src/models/topic-description.dart';
+import 'package:tictac/src/services/future-manager.dart';
+import 'package:tictac/src/models/server-messages.dart';
+import 'package:tictac/src/services/configuration.dart';
+import 'package:tictac/src/services/cache-manager.dart';
+import 'package:tictac/src/models/account-params.dart';
+import 'package:tictac/src/services/connection.dart';
+import 'package:tictac/src/models/packet-data.dart';
+import 'package:tictac/src/models/set-params.dart';
+import 'package:tictac/src/models/get-query.dart';
+import 'package:tictac/src/models/del-range.dart';
+import 'package:tictac/src/services/logger.dart';
+import 'package:tictac/src/models/message.dart';
+import 'package:tictac/src/services/tools.dart';
+import 'package:tictac/src/services/auth.dart';
+import 'package:tictac/src/services/services.dart';
+import 'package:tictac/src/models/packet.dart';
+import 'package:tictac/src/topic-fnd.dart';
+import 'package:tictac/src/topic-me.dart';
+import 'package:tictac/src/topic.dart';
 
 /// This class contains basic functionality and logic to generate and send tinode packages
 class TinodeService {
@@ -64,15 +64,18 @@ class TinodeService {
   /// This event will be triggered when a `info` message is received
   PublishSubject<dynamic> onInfoMessage = PublishSubject<dynamic>();
 
-  /// Creates a new instance of TinodeService
-  TinodeService() {
-    _connectionService = GetIt.I.get<ConnectionService>();
-    _packetGenerator = GetIt.I.get<PacketGenerator>();
-    _futureManager = GetIt.I.get<FutureManager>();
-    _loggerService = GetIt.I.get<LoggerService>();
-    _configService = GetIt.I.get<ConfigService>();
-    _cacheManager = GetIt.I.get<CacheManager>();
-    _authService = GetIt.I.get<AuthService>();
+  /// Service container for passing to child objects (Topic, etc.)
+  late TinodeServices _services;
+
+  TinodeService.withServices(TinodeServices services) {
+    _services = services;
+    _connectionService = services.connection;
+    _packetGenerator = services.packetGenerator;
+    _futureManager = services.futureManager;
+    _loggerService = services.logger;
+    _configService = services.config;
+    _cacheManager = services.cacheManager;
+    _authService = services.auth;
   }
 
   /// Process a packet if the packet type is `ctrl`
@@ -294,11 +297,11 @@ class TinodeService {
     Topic? topic = _cacheManager.get('topic', topicName ?? '');
     if (topic == null && topicName != null) {
       if (topicName == topic_names.TOPIC_ME) {
-        topic = TopicMe();
+        topic = TopicMe(services: _services);
       } else if (topicName == topic_names.TOPIC_FND) {
-        topic = TopicFnd();
+        topic = TopicFnd(services: _services);
       } else {
-        topic = Topic(topicName);
+        topic = Topic(topicName, services: _services);
       }
       _cacheManager.put('topic', topicName, topic);
     }
@@ -306,11 +309,11 @@ class TinodeService {
   }
 
   Topic newTopic() {
-    return Topic(topic_names.TOPIC_NEW);
+    return Topic(topic_names.TOPIC_NEW, services: _services);
   }
 
   Topic newChannel() {
-    return Topic(topic_names.TOPIC_NEW_CHAN);
+    return Topic(topic_names.TOPIC_NEW_CHAN, services: _services);
   }
 
   String newGroupTopicName(bool isChan) {
@@ -318,13 +321,13 @@ class TinodeService {
   }
 
   Topic newTopicWith(String peerUserId) {
-    return Topic(peerUserId);
+    return Topic(peerUserId, services: _services);
   }
 
   /// Create message draft without sending it to the server
   Message createMessage(String topicName, dynamic data, bool? echo) {
     echo ??= true;
-    return Message(topicName, data, echo);
+    return Message(topicName, data, echo, packetGenerator: _packetGenerator);
   }
 
   /// Publish message to topic. The message should be created by `createMessage`

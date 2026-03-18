@@ -4,57 +4,57 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:rxdart/rxdart.dart';
-import 'package:get_it/get_it.dart';
 
-import 'package:tinode/src/models/topic-names.dart' as topic_names;
-import 'package:tinode/src/models/server-configuration.dart';
-import 'package:tinode/src/models/connection-options.dart';
-import 'package:tinode/src/services/packet-generator.dart';
-import 'package:tinode/src/services/future-manager.dart';
-import 'package:tinode/src/models/server-messages.dart';
-import 'package:tinode/src/services/cache-manager.dart';
-import 'package:tinode/src/services/configuration.dart';
-import 'package:tinode/src/models/account-params.dart';
-import 'package:tinode/src/services/connection.dart';
-import 'package:tinode/src/models/access-mode.dart';
-import 'package:tinode/src/models/set-params.dart';
-import 'package:tinode/src/models/auth-token.dart';
-import 'package:tinode/src/models/del-range.dart';
-import 'package:tinode/src/models/get-query.dart';
-import 'package:tinode/src/services/logger.dart';
-import 'package:tinode/src/services/tinode.dart';
-import 'package:tinode/src/models/message.dart';
-import 'package:tinode/src/services/tools.dart';
-import 'package:tinode/src/services/auth.dart';
-import 'package:tinode/src/topic-fnd.dart';
-import 'package:tinode/src/topic-me.dart';
-import 'package:tinode/src/topic.dart';
+import 'package:tictac/src/models/topic-names.dart' as topic_names;
+import 'package:tictac/src/models/server-configuration.dart';
+import 'package:tictac/src/models/connection-options.dart';
+import 'package:tictac/src/services/packet-generator.dart';
+import 'package:tictac/src/services/future-manager.dart';
+import 'package:tictac/src/models/server-messages.dart';
+import 'package:tictac/src/services/cache-manager.dart';
+import 'package:tictac/src/services/configuration.dart';
+import 'package:tictac/src/models/account-params.dart';
+import 'package:tictac/src/services/connection.dart';
+import 'package:tictac/src/models/access-mode.dart';
+import 'package:tictac/src/models/set-params.dart';
+import 'package:tictac/src/models/auth-token.dart';
+import 'package:tictac/src/models/del-range.dart';
+import 'package:tictac/src/models/get-query.dart';
+import 'package:tictac/src/services/logger.dart';
+import 'package:tictac/src/services/services.dart';
+import 'package:tictac/src/services/tinode.dart';
+import 'package:tictac/src/models/message.dart';
+import 'package:tictac/src/services/tools.dart';
+import 'package:tictac/src/services/auth.dart';
+import 'package:tictac/src/topic-fnd.dart';
+import 'package:tictac/src/topic-me.dart';
+import 'package:tictac/src/topic.dart';
 
-export 'package:tinode/src/models/server-configuration.dart';
-export 'package:tinode/src/models/connection-options.dart';
-export 'package:tinode/src/models/delete-transaction.dart';
-export 'package:tinode/src/models/topic-subscription.dart';
-export 'package:tinode/src/models/topic-description.dart';
-export 'package:tinode/src/models/server-messages.dart';
-export 'package:tinode/src/models/account-params.dart';
-export 'package:tinode/src/models/message-status.dart';
-export 'package:tinode/src/models/contact-update.dart';
-export 'package:tinode/src/models/app-settings.dart';
-export 'package:tinode/src/models/packet-types.dart';
-export 'package:tinode/src/models/packet-data.dart';
-export 'package:tinode/src/models/auth-token.dart';
-export 'package:tinode/src/models/auth-token.dart';
-export 'package:tinode/src/models/credential.dart';
-export 'package:tinode/src/models/set-params.dart';
-export 'package:tinode/src/meta-get-builder.dart';
-export 'package:tinode/src/models/del-range.dart';
-export 'package:tinode/src/models/get-query.dart';
-export 'package:tinode/src/services/tools.dart';
-export 'package:tinode/src/models/def-acs.dart';
-export 'package:tinode/src/sorted-cache.dart';
-export 'package:tinode/src/topic-fnd.dart';
-export 'package:tinode/src/topic-me.dart';
-export 'package:tinode/src/topic.dart';
+export 'package:tictac/src/models/server-configuration.dart';
+export 'package:tictac/src/models/connection-options.dart';
+export 'package:tictac/src/models/delete-transaction.dart';
+export 'package:tictac/src/models/topic-subscription.dart';
+export 'package:tictac/src/models/topic-description.dart';
+export 'package:tictac/src/models/server-messages.dart';
+export 'package:tictac/src/models/account-params.dart';
+export 'package:tictac/src/models/message-status.dart';
+export 'package:tictac/src/models/contact-update.dart';
+export 'package:tictac/src/models/app-settings.dart';
+export 'package:tictac/src/models/packet-types.dart';
+export 'package:tictac/src/models/packet-data.dart';
+export 'package:tictac/src/models/auth-token.dart';
+export 'package:tictac/src/models/auth-token.dart';
+export 'package:tictac/src/models/credential.dart';
+export 'package:tictac/src/models/set-params.dart';
+export 'package:tictac/src/meta-get-builder.dart';
+export 'package:tictac/src/models/del-range.dart';
+export 'package:tictac/src/models/get-query.dart';
+export 'package:tictac/src/services/tools.dart';
+export 'package:tictac/src/models/def-acs.dart';
+export 'package:tictac/src/sorted-cache.dart';
+export 'package:tictac/src/topic-fnd.dart';
+export 'package:tictac/src/topic-me.dart';
+export 'package:tictac/src/topic.dart';
 
 /// Provides a simple interface to interact with tinode server using websocket
 class Tinode {
@@ -110,39 +110,20 @@ class Tinode {
   /// `options` connection configuration and api key
   ///
   /// `loggerEnabled` pass `true` if you want to turn the logger on
+  late TinodeServices _services;
+
   Tinode(String appName, ConnectionOptions options, bool loggerEnabled) {
-    _registerDependencies(options, loggerEnabled);
-    _resolveDependencies();
+    _services = TinodeServices(options, loggerEnabled);
+    _configService = _services.config;
+    _tinodeService = _services.tinode;
+    _futureManager = _services.futureManager;
+    _loggerService = _services.logger;
+    _connectionService = _services.connection;
+    _cacheManager = _services.cacheManager;
+    _authService = _services.auth;
 
     _configService.appName = appName;
     _doSubscriptions();
-  }
-
-  /// Register services in dependency injection container
-  void _registerDependencies(ConnectionOptions options, bool loggerEnabled) {
-    var registered = GetIt.I.isRegistered<ConfigService>();
-
-    if (!registered) {
-      GetIt.I.registerSingleton<ConfigService>(ConfigService(loggerEnabled));
-      GetIt.I.registerSingleton<LoggerService>(LoggerService());
-      GetIt.I.registerSingleton<AuthService>(AuthService());
-      GetIt.I.registerSingleton<ConnectionService>(ConnectionService(options));
-      GetIt.I.registerSingleton<FutureManager>(FutureManager());
-      GetIt.I.registerSingleton<PacketGenerator>(PacketGenerator());
-      GetIt.I.registerSingleton<CacheManager>(CacheManager());
-      GetIt.I.registerSingleton<TinodeService>(TinodeService());
-    }
-  }
-
-  /// Resolve dependencies from container
-  void _resolveDependencies() {
-    _configService = GetIt.I.get<ConfigService>();
-    _tinodeService = GetIt.I.get<TinodeService>();
-    _futureManager = GetIt.I.get<FutureManager>();
-    _loggerService = GetIt.I.get<LoggerService>();
-    _connectionService = GetIt.I.get<ConnectionService>();
-    _cacheManager = GetIt.I.get<CacheManager>();
-    _authService = GetIt.I.get<AuthService>();
   }
 
   /// Subscribe to needed events like connection

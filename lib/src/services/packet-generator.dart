@@ -1,17 +1,13 @@
-import 'package:get_it/get_it.dart';
-
-import 'package:tinode/src/models/packet-types.dart' as packet_types;
-import 'package:tinode/src/services/configuration.dart';
-import 'package:tinode/src/models/packet-data.dart';
-import 'package:tinode/src/services/tools.dart';
-import 'package:tinode/src/models/packet.dart';
+import 'package:tictac/src/models/packet-types.dart' as packet_types;
+import 'package:tictac/src/services/configuration.dart';
+import 'package:tictac/src/models/packet-data.dart';
+import 'package:tictac/src/services/tools.dart';
+import 'package:tictac/src/models/packet.dart';
 
 class PacketGenerator {
   late ConfigService _configService;
 
-  PacketGenerator() {
-    _configService = GetIt.I.get<ConfigService>();
-  }
+  PacketGenerator.withConfig(this._configService);
 
   Packet generate(String type, String? topicName) {
     PacketData packetData;

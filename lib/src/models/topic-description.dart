@@ -1,5 +1,5 @@
-import 'package:tinode/src/models/access-mode.dart';
-import 'package:tinode/src/models/def-acs.dart';
+import 'package:tictac/src/models/access-mode.dart';
+import 'package:tictac/src/models/def-acs.dart';
 
 class TopicDescription {
   /// Topic creation date

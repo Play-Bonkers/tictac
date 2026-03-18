@@ -1,8 +1,8 @@
-import 'package:tinode/src/models/topic-subscription.dart';
-import 'package:tinode/src/models/delete-transaction.dart';
-import 'package:tinode/src/models/topic-description.dart';
-import 'package:tinode/src/models/access-mode.dart';
-import 'package:tinode/src/models/credential.dart';
+import 'package:tictac/src/models/topic-subscription.dart';
+import 'package:tictac/src/models/delete-transaction.dart';
+import 'package:tictac/src/models/topic-description.dart';
+import 'package:tictac/src/models/access-mode.dart';
+import 'package:tictac/src/models/credential.dart';
 
 class ServerMessage {
   final CtrlMessage? ctrl;

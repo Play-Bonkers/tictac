@@ -1,9 +1,9 @@
 import 'dart:math';
 
-import 'package:tinode/src/models/topic-names.dart' as topic_names;
-import 'package:tinode/src/models/connection-options.dart';
-import 'package:tinode/src/models/access-mode.dart';
-import 'package:tinode/src/models/values.dart';
+import 'package:tictac/src/models/topic-names.dart' as topic_names;
+import 'package:tictac/src/models/connection-options.dart';
+import 'package:tictac/src/models/access-mode.dart';
+import 'package:tictac/src/models/values.dart';
 
 /// Initialize a random message Id
 var messageId = Random().nextInt(0xFFFF) + 0xFFFF;

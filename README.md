@@ -1,41 +1,53 @@
-# Tinode Dart SDK  ![tests](https://github.com/tinode/dart-sdk/actions/workflows/dart.yml/badge.svg)
+# TicTac
 
-<img align="right" height="100" width="200" src="https://user-images.githubusercontent.com/32099630/112821615-28e00500-909c-11eb-831d-9e16fdcc86c0.png">
+**Torpedo Internal Component for Text and Audio Chat**
 
-This SDK implements [Tinode](https://github.com/tinode/chat) client-side protocol for multi platform applications based on dart. This is not a standalone project. It can only be used in conjunction with the [Tinode server](https://github.com/tinode/chat). You can find released packages and versions on [pub page](https://pub.dev/packages/tinode).
+Flutter chat library that connects directly to Tinode over websocket, with an abstraction layer that isolates consumers from Tinode internals.
 
-## Installation
-
-### Depend on it
-
-Run this command for dart applications:
+## Architecture
 
 ```
-dart pub add tinode
+Bonkers App
+  └─ TicTacBridge (app-specific integration)
+       └─ package:tictac
+            ├─ TicTacModule      (connection, auth, reconnect)
+            ├─ TopicController   (per-topic state, ChangeNotifier)
+            ├─ TicTacChat        (wraps flutter_chat_ui)
+            ├─ models/           (own types -- no Tinode leakage)
+            └─ identity/         (app_user_id <-> tinode_user_id mapping)
+                    ↓ websocket
+               Tinode Server
+                    ↓ REST auth
+               Lambda -> TAILS
 ```
 
-Run this command for flutter applications:
+## Auth Flow
 
+1. Client calls `login("rest", protobuf-encoded RestAuthSecret)`
+2. Tinode REST auth plugin forwards to Lambda -> TAILS
+3. Returns Tinode token (14-day expiry) + tinode user ID
+4. Subsequent reconnects use `loginToken(cachedToken)`
+
+## Key Design Rules
+
+- **No Tinode types exposed** to consuming apps -- tictac defines its own model classes
+- **IdentityResolver** abstraction for app_user_id <-> tinode_user_id mapping
+- Phase 1: `CachedIdentityResolver` (seeded from auth + topic membership)
+- Phase 2: `TagsIdentityResolver` (calls TAILS via TAGS ALB)
+
+## Development
+
+```bash
+# Install dependencies
+dart pub get
+
+# Run unit tests
+dart test test/models/ test/services/
+
+# Run smoke tests (requires Tinode dev server)
+dart test test/smoke/
 ```
-flutter pub add tinode
-```
 
-### Import it
+## Origin
 
-Now in your Dart code, you can use:
-
-```
-import 'package:tinode/tinode.dart';
-```
-
-## Getting support
-* Read [server-side](https://github.com/tinode/chat/blob/master/docs/API.md) API documentation to know about packets.
-* A complete documentation will be created soon.
-* You can see a simple example in `./example` directory.
-* For bugs and feature requests [open an issue](https://github.com/tinode/dart-sdk/issues/new)
-
-## Platform support
-* Servers
-* Command-line scripts
-* Flutter mobile apps
-* Flutter desktop apps
+Forked from [tinode/dart-sdk](https://github.com/tinode/dart-sdk) (archived Nov 2025). GetIt dependency removed, package renamed, Dart 3 compatible.

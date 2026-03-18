@@ -1,4 +1,4 @@
-import 'package:tinode/src/models/access-mode.dart';
+import 'package:tictac/src/models/access-mode.dart';
 import 'package:test/test.dart';
 
 void main() {

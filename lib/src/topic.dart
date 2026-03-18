@@ -1,32 +1,33 @@
 import 'package:rxdart/rxdart.dart';
-import 'package:get_it/get_it.dart';
+
+import 'package:tictac/src/services/services.dart';
 
 import 'dart:async';
 import 'dart:math';
 
-import 'package:tinode/src/models/message-status.dart' as message_status;
-import 'package:tinode/src/models/topic-names.dart' as topic_names;
-import 'package:tinode/src/models/delete-transaction.dart';
-import 'package:tinode/src/models/topic-subscription.dart';
-import 'package:tinode/src/models/topic-description.dart';
-import 'package:tinode/src/services/cache-manager.dart';
-import 'package:tinode/src/models/server-messages.dart';
-import 'package:tinode/src/services/configuration.dart';
-import 'package:tinode/src/models/access-mode.dart';
-import 'package:tinode/src/models/credential.dart';
-import 'package:tinode/src/models/set-params.dart';
-import 'package:tinode/src/meta-get-builder.dart';
-import 'package:tinode/src/models/del-range.dart';
-import 'package:tinode/src/models/get-query.dart';
-import 'package:tinode/src/services/logger.dart';
-import 'package:tinode/src/services/tinode.dart';
-import 'package:tinode/src/models/message.dart';
-import 'package:tinode/src/models/def-acs.dart';
-import 'package:tinode/src/services/tools.dart';
-import 'package:tinode/src/models/values.dart';
-import 'package:tinode/src/services/auth.dart';
-import 'package:tinode/src/sorted-cache.dart';
-import 'package:tinode/src/topic-me.dart';
+import 'package:tictac/src/models/message-status.dart' as message_status;
+import 'package:tictac/src/models/topic-names.dart' as topic_names;
+import 'package:tictac/src/models/delete-transaction.dart';
+import 'package:tictac/src/models/topic-subscription.dart';
+import 'package:tictac/src/models/topic-description.dart';
+import 'package:tictac/src/services/cache-manager.dart';
+import 'package:tictac/src/models/server-messages.dart';
+import 'package:tictac/src/services/configuration.dart';
+import 'package:tictac/src/models/access-mode.dart';
+import 'package:tictac/src/models/credential.dart';
+import 'package:tictac/src/models/set-params.dart';
+import 'package:tictac/src/meta-get-builder.dart';
+import 'package:tictac/src/models/del-range.dart';
+import 'package:tictac/src/models/get-query.dart';
+import 'package:tictac/src/services/logger.dart';
+import 'package:tictac/src/services/tinode.dart';
+import 'package:tictac/src/models/message.dart';
+import 'package:tictac/src/models/def-acs.dart';
+import 'package:tictac/src/services/tools.dart';
+import 'package:tictac/src/models/values.dart';
+import 'package:tictac/src/services/auth.dart';
+import 'package:tictac/src/sorted-cache.dart';
+import 'package:tictac/src/topic-me.dart';
 
 class Topic {
   /// This topic's name
@@ -145,17 +146,25 @@ class Topic {
   /// This event will be triggered when all messages are received
   PublishSubject<int> onAllMessagesReceived = PublishSubject<int>();
 
-  Topic(String topicName) {
-    _resolveDependencies();
+  TinodeServices? _services;
+
+  /// Access the service container (for MetaGetBuilder, Message, etc.)
+  TinodeServices? get services => _services;
+
+  Topic(String topicName, {TinodeServices? services}) {
+    if (services != null) {
+      _initFromServices(services);
+    }
     name = topicName;
   }
 
-  void _resolveDependencies() {
-    _authService = GetIt.I.get<AuthService>();
-    _cacheManager = GetIt.I.get<CacheManager>();
-    _loggerService = GetIt.I.get<LoggerService>();
-    _tinodeService = GetIt.I.get<TinodeService>();
-    _configService = GetIt.I.get<ConfigService>();
+  void _initFromServices(TinodeServices services) {
+    _services = services;
+    _authService = services.auth;
+    _cacheManager = services.cacheManager;
+    _loggerService = services.logger;
+    _tinodeService = services.tinode;
+    _configService = services.config;
   }
 
   // See if you have subscribed to this topic

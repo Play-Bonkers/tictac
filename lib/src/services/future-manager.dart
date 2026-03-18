@@ -1,9 +1,8 @@
-import 'package:get_it/get_it.dart';
 import 'dart:async';
 
-import 'package:tinode/src/models/future-callback.dart';
-import 'package:tinode/src/services/configuration.dart';
-import 'package:tinode/src/services/logger.dart';
+import 'package:tictac/src/models/future-callback.dart';
+import 'package:tictac/src/services/configuration.dart';
+import 'package:tictac/src/services/logger.dart';
 
 class FutureManager {
   final Map<String, FutureCallback> _pendingFutures = {};
@@ -11,10 +10,7 @@ class FutureManager {
   late ConfigService _configService;
   late LoggerService _loggerService;
 
-  FutureManager() {
-    _configService = GetIt.I.get<ConfigService>();
-    _loggerService = GetIt.I.get<LoggerService>();
-  }
+  FutureManager.withServices(this._configService, this._loggerService);
 
   Future<dynamic> makeFuture(String id) {
     var completer = Completer();
