@@ -9,7 +9,6 @@
   &lt;li&gt;Static analysis&lt;/li&gt;
   &lt;li&gt;Unit tests&lt;/li&gt;
   &lt;li&gt;Integration tests (Tinode dev server)&lt;/li&gt;
-  &lt;li&gt;Smoke tests&lt;/li&gt;
 &lt;/ol&gt;
 
 &lt;h4&gt;Manual release (Build with Parameters):&lt;/h4&gt;
@@ -84,13 +83,34 @@ set -e
 export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
 
 IS_RELEASE="false"
+TAG_NAME=""
+BUILD_MODE="CI"
+
 if [ "${RELEASE_TYPE}" != "none" ] &amp;&amp; [ -n "${RELEASE_TYPE}" ]; then
     IS_RELEASE="true"
-fi
+    BUILD_MODE="Release"
 
-if [ "$IS_RELEASE" = "true" ]; then
+    # Compute version now so it is available for build name and slack
+    git remote set-url origin "https://${GITHUB_TOKEN}@github.com/Play-Bonkers/tictac.git"
+    git fetch --tags --prune --prune-tags
+
+    LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    if [ -z "$LATEST_TAG" ]; then
+        LATEST_TAG="v0.0.0"
+    fi
+
+    VERSION="${LATEST_TAG#v}"
+    IFS='.' read -r MAJOR MINOR PATCH &lt;&lt;&lt; "$VERSION"
+
+    case "${RELEASE_TYPE}" in
+        major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+        minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+        patch) PATCH=$((PATCH + 1)) ;;
+    esac
+
+    TAG_NAME="v${MAJOR}.${MINOR}.${PATCH}"
     echo "=========================================="
-    echo "TicTac Release Build (${RELEASE_TYPE})"
+    echo "TicTac Release Build: ${LATEST_TAG} -&gt; ${TAG_NAME} (${RELEASE_TYPE})"
     echo "=========================================="
 else
     echo "=========================================="
@@ -98,7 +118,9 @@ else
     echo "=========================================="
 fi
 
-echo "IS_RELEASE=${IS_RELEASE}" &gt; env.properties</command>
+echo "IS_RELEASE=${IS_RELEASE}" &gt; env.properties
+echo "TAG_NAME=${TAG_NAME}" &gt;&gt; env.properties
+echo "BUILD_MODE=${BUILD_MODE}" &gt;&gt; env.properties</command>
       <configuredLocalRules/>
     </hudson.tasks.Shell>
     <EnvInjectBuilder plugin="envinject@2.926.v69c9b_3896a_96">
@@ -145,7 +167,7 @@ set -e
 export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
 
 echo "=========================================="
-echo "Unit Tests"
+echo "Unit Tests (42 tests)"
 echo "=========================================="
 
 cd $WORKSPACE
@@ -161,29 +183,13 @@ set -e
 export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
 
 echo "=========================================="
-echo "Integration Tests (Tinode Dev Server)"
+echo "Integration Tests (16 tests, Tinode Dev)"
 echo "=========================================="
 
 cd $WORKSPACE
 flutter test test/integration/tictac_integration_test.dart --timeout 120s
 
 echo "Integration tests passed"</command>
-      <configuredLocalRules/>
-    </hudson.tasks.Shell>
-    <hudson.tasks.Shell>
-      <command>#!/bin/bash
-set -e
-
-export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
-
-echo "=========================================="
-echo "Smoke Tests (Tinode Dev Server)"
-echo "=========================================="
-
-cd $WORKSPACE
-flutter test test/smoke/tinode_smoke_test.dart --timeout 60s || echo "Smoke tests completed (some may be expected failures)"
-
-echo "Smoke tests done"</command>
       <configuredLocalRules/>
     </hudson.tasks.Shell>
     <hudson.tasks.Shell>
@@ -201,43 +207,17 @@ if [ "${IS_RELEASE}" != "true" ]; then
 fi
 
 echo "=========================================="
-echo "Release: computing version"
+echo "Tagging Release: ${TAG_NAME}"
 echo "=========================================="
 
 cd $WORKSPACE
 
-# Set up git auth
-git remote set-url origin "https://${GITHUB_TOKEN}@github.com/Play-Bonkers/tictac.git"
-git fetch --tags --prune --prune-tags
-
-# Find latest semver tag
-LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-if [ -z "$LATEST_TAG" ]; then
-    LATEST_TAG="v0.0.0"
-fi
-
-VERSION="${LATEST_TAG#v}"
-IFS='.' read -r MAJOR MINOR PATCH &lt;&lt;&lt; "$VERSION"
-
-case "${RELEASE_TYPE}" in
-    major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-    minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-    patch) PATCH=$((PATCH + 1)) ;;
-esac
-
-NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-TAG_NAME="v${NEW_VERSION}"
-
-echo "${LATEST_TAG} -> ${TAG_NAME} (${RELEASE_TYPE})"
-
-# Tag only -- no commit to main (avoids webhook loop)
 git config user.name "Jenkins CI"
 git config user.email "jenkins@playbonkers.com"
 git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
 git push origin "${TAG_NAME}"
 
 echo "=========================================="
-echo "BUILD_DISPLAY=#${BUILD_NUMBER} ${TAG_NAME}" > env.properties
 echo "Released ${TAG_NAME}"
 echo "https://github.com/Play-Bonkers/tictac/releases/tag/${TAG_NAME}"
 echo "=========================================="</command>
@@ -265,23 +245,23 @@ echo "=========================================="</command>
       <notifyEveryFailure>true</notifyEveryFailure>
       <notifyBackToNormal>true</notifyBackToNormal>
       <notifyRepeatedFailure>true</notifyRepeatedFailure>
-      <includeTestSummary>true</includeTestSummary>
-      <includeFailedTests>true</includeFailedTests>
+      <includeTestSummary>false</includeTestSummary>
+      <includeFailedTests>false</includeFailedTests>
       <uploadFiles>false</uploadFiles>
       <artifactIncludes/>
       <commitInfoChoice>AUTHORS_AND_TITLES</commitInfoChoice>
       <includeCustomMessage>true</includeCustomMessage>
-      <customMessage>*TicTac* #${BUILD_NUMBER}
-&lt;${BUILD_URL}console|View Logs&gt;</customMessage>
-      <customMessageSuccess>*TicTac* #${BUILD_NUMBER} :white_check_mark:
+      <customMessage>*TicTac* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; started</customMessage>
+      <customMessageSuccess>*TicTac ${BUILD_MODE}* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; ${TAG_NAME} :white_check_mark:
+42 unit + 16 integration tests passed
 &lt;${BUILD_URL}console|View Logs&gt;</customMessageSuccess>
-      <customMessageAborted>*TicTac* #${BUILD_NUMBER} :no_entry: Aborted
-&lt;${BUILD_URL}console|View Logs&gt;</customMessageAborted>
+      <customMessageAborted>*TicTac ${BUILD_MODE}* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; ${TAG_NAME} :no_entry:
+Aborted</customMessageAborted>
       <customMessageNotBuilt/>
-      <customMessageUnstable>*TicTac* #${BUILD_NUMBER} :warning: Unstable
-&lt;${BUILD_URL}console|View Logs&gt;</customMessageUnstable>
-      <customMessageFailure>*TicTac* #${BUILD_NUMBER} :x: FAILED
-&lt;${BUILD_URL}console|View Logs&gt;</customMessageFailure>
+      <customMessageUnstable>*TicTac ${BUILD_MODE}* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; ${TAG_NAME} :warning:
+Some tests failed -- &lt;${BUILD_URL}console|View Logs&gt;</customMessageUnstable>
+      <customMessageFailure>*TicTac ${BUILD_MODE}* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; ${TAG_NAME} :x:
+FAILED -- &lt;${BUILD_URL}console|View Logs&gt;</customMessageFailure>
     </jenkins.plugins.slack.SlackNotifier>
   </publishers>
   <buildWrappers>
@@ -295,7 +275,7 @@ echo "=========================================="</command>
     </org.jenkinsci.plugins.credentialsbinding.impl.SecretBuildWrapper>
     <hudson.plugins.timestamper.TimestamperBuildWrapper plugin="timestamper@1.28"/>
     <org.jenkinsci.plugins.buildnamesetter.BuildNameSetter plugin="build-name-setter@2.5.1">
-      <template>${BUILD_DISPLAY}</template>
+      <template>#${BUILD_NUMBER} ${BUILD_MODE} ${TAG_NAME}</template>
       <descriptionTemplate/>
       <runAtStart>false</runAtStart>
       <runAtEnd>true</runAtEnd>

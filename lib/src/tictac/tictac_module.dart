@@ -335,13 +335,20 @@ class TicTacModule {
     }
 
     final topic = _tinode!.getTopic(topicId);
-    await topic.subscribe(
-      tinode.MetaGetBuilder(topic)
+
+    // Use withLaterSub for previously-subscribed topics (has cached desc),
+    // fall back to withSub for new topics where _lastDescUpdate is uninitialized
+    tinode.MetaGetBuilder builder;
+    try {
+      builder = tinode.MetaGetBuilder(topic)
           .withLaterData(config.recentMessages)
-          .withLaterSub(null)
-          .build(),
-      null,
-    );
+          .withLaterSub(null);
+    } on Error {
+      builder = tinode.MetaGetBuilder(topic)
+          .withData(null, null, config.recentMessages)
+          .withSub(null, null, null);
+    }
+    await topic.subscribe(builder.build(), null);
 
     final controller = TopicController(
       topicId: topicId,
