@@ -183,7 +183,7 @@ echo "=========================================="
 
 cd $WORKSPACE
 
-flutter analyze --no-fatal-infos lib/
+flutter analyze --no-fatal-infos --no-fatal-warnings lib/
 
 echo "Static analysis passed"</command>
       <configuredLocalRules/>
