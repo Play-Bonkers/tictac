@@ -14,7 +14,7 @@
 &lt;/ol&gt;
 
 &lt;h4&gt;Trigger:&lt;/h4&gt;
-&lt;p&gt;Manual only. Select a release type (patch, minor, major) and run.&lt;/p&gt;
+&lt;p&gt;Auto-triggers on merge to main (runs tests only). Manual trigger with release type to bump version and tag.&lt;/p&gt;
 
 &lt;h4&gt;Links:&lt;/h4&gt;
 &lt;ul&gt;
@@ -70,7 +70,11 @@
   <disabled>false</disabled>
   <blockBuildWhenDownstreamBuilding>false</blockBuildWhenDownstreamBuilding>
   <blockBuildWhenUpstreamBuilding>false</blockBuildWhenUpstreamBuilding>
-  <triggers/>
+  <triggers>
+    <com.cloudbees.jenkins.GitHubPushTrigger plugin="github@1.43.0">
+      <spec/>
+    </com.cloudbees.jenkins.GitHubPushTrigger>
+  </triggers>
   <concurrentBuild>false</concurrentBuild>
   <builders>
     <hudson.tasks.Shell>
@@ -128,12 +132,21 @@ NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 TAG_NAME="v${NEW_VERSION}"
 
 echo "=========================================="
-echo "Version bump: ${LATEST_TAG} -> ${TAG_NAME} (${RELEASE_TYPE})"
+echo "Version bump: ${LATEST_TAG} -&gt; ${TAG_NAME} (${RELEASE_TYPE})"
 echo "Build: ${BUILD_NUMBER}"
 echo "=========================================="
 
+# On webhook trigger RELEASE_TYPE defaults to "patch" but we skip tagging
+# Set AUTO_BUILD flag if triggered by webhook (no user interaction)
+if [ -z "${BUILD_CAUSE}" ] || echo "${BUILD_CAUSE}" | grep -qi "github"; then
+    AUTO_BUILD=true
+else
+    AUTO_BUILD=false
+fi
+
 echo "TAG_NAME=${TAG_NAME}" &gt; env.properties
-echo "VERSION=${NEW_VERSION}" &gt;&gt; env.properties</command>
+echo "VERSION=${NEW_VERSION}" &gt;&gt; env.properties
+echo "AUTO_BUILD=${AUTO_BUILD}" &gt;&gt; env.properties</command>
       <configuredLocalRules/>
     </hudson.tasks.Shell>
     <EnvInjectBuilder plugin="envinject@2.926.v69c9b_3896a_96">
@@ -236,6 +249,12 @@ echo "=========================================="
 echo "Tag Release: ${TAG_NAME}"
 echo "=========================================="
 
+if [ "${AUTO_BUILD}" = "true" ]; then
+    echo "Auto-build (webhook trigger) -- skipping version bump and tag."
+    echo "To release, trigger manually with a RELEASE_TYPE."
+    exit 0
+fi
+
 cd $WORKSPACE
 
 # Update version in pubspec.yaml
@@ -289,27 +308,27 @@ echo "=========================================="</command>
       <commitInfoChoice>AUTHORS_AND_TITLES</commitInfoChoice>
       <includeCustomMessage>true</includeCustomMessage>
       <customMessage>*TicTac Client Release*
-*Release:* ${RELEASE_TYPE} -> ${TAG_NAME}
+*Release:* ${RELEASE_TYPE} -&gt; ${TAG_NAME}
 *Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt;
 *Console:* &lt;${BUILD_URL}console|View Logs&gt;</customMessage>
       <customMessageSuccess>*TicTac Client Release*
-*Release:* ${RELEASE_TYPE} -> ${TAG_NAME}
+*Release:* ${RELEASE_TYPE} -&gt; ${TAG_NAME}
 *Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :white_check_mark:
 *Console:* &lt;${BUILD_URL}console|View Logs&gt;
 *Status:* Published to &lt;https://github.com/Play-Bonkers/tictac|tictac&gt;</customMessageSuccess>
       <customMessageAborted>*TicTac Client Release*
-*Release:* ${RELEASE_TYPE} -> ${TAG_NAME}
+*Release:* ${RELEASE_TYPE} -&gt; ${TAG_NAME}
 *Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :no_entry:
 *Console:* &lt;${BUILD_URL}console|View Logs&gt;
 *Status:* Aborted</customMessageAborted>
       <customMessageNotBuilt/>
       <customMessageUnstable>*TicTac Client Release*
-*Release:* ${RELEASE_TYPE} -> ${TAG_NAME}
+*Release:* ${RELEASE_TYPE} -&gt; ${TAG_NAME}
 *Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :warning:
 *Console:* &lt;${BUILD_URL}console|View Logs&gt;
 *Status:* Unstable (some tests failed)</customMessageUnstable>
       <customMessageFailure>*TicTac Client Release*
-*Release:* ${RELEASE_TYPE} -> ${TAG_NAME}
+*Release:* ${RELEASE_TYPE} -&gt; ${TAG_NAME}
 *Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :x:
 *Console:* &lt;${BUILD_URL}console|View Logs&gt;
 *Status:* FAILED</customMessageFailure>
@@ -327,7 +346,7 @@ echo "=========================================="</command>
     <hudson.plugins.timestamper.TimestamperBuildWrapper plugin="timestamper@1.28"/>
     <org.jenkinsci.plugins.buildnamesetter.BuildNameSetter plugin="build-name-setter@2.5.1">
       <template>#${BUILD_NUMBER} - ${TAG_NAME}</template>
-      <descriptionTemplate>${RELEASE_TYPE} release -> ${TAG_NAME}</descriptionTemplate>
+      <descriptionTemplate>${RELEASE_TYPE} release -&gt; ${TAG_NAME}</descriptionTemplate>
       <runAtStart>false</runAtStart>
       <runAtEnd>true</runAtEnd>
     </org.jenkinsci.plugins.buildnamesetter.BuildNameSetter>
