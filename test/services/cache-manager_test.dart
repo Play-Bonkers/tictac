@@ -1,4 +1,4 @@
-import 'package:test/test.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 import 'package:tictac/src/models/topic-subscription.dart';
 import 'package:tictac/src/services/cache-manager.dart';

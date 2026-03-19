@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:test/test.dart';
+import 'package:flutter_test/flutter_test.dart';
 import 'package:tictac/tinode.dart';
 import 'package:tictac/src/models/rest-auth-secret.dart';
 

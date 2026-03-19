@@ -1,5 +1,5 @@
 import 'package:tictac/src/models/access-mode.dart';
-import 'package:test/test.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('decode(null) returns null', () {

@@ -1,4 +1,4 @@
-import 'package:test/test.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 import 'package:tictac/src/models/auth-token.dart';
 import 'package:tictac/src/models/server-messages.dart';

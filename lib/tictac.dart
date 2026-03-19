@@ -6,8 +6,7 @@ library tictac;
 // Core
 export 'src/tictac/tictac_module.dart' show TicTacModule;
 export 'src/tictac/tictac_config.dart' show TicTacConfig;
-export 'src/tictac/topic_controller.dart'
-    show TopicController, ChatMessage, ChatMember, MessageStatus;
+export 'src/tictac/topic_controller.dart' show TopicController;
 
 // Models (tictac's own types — no Tinode leakage)
 export 'src/tictac/models/topic.dart' show Topic;
@@ -21,7 +20,10 @@ export 'src/tictac/identity/identity_resolver.dart' show IdentityResolver;
 export 'src/tictac/identity/cached_identity_resolver.dart'
     show CachedIdentityResolver;
 
-// Widget layer (requires Flutter — see tictac_chat.dart)
-// export 'src/tictac/tictac_chat.dart' show TicTacChat;
-// export 'src/tictac/typing_dots.dart' show TicTacTypingDots, TicTacTypingDotsOptions;
-// export 'src/tictac/message_actions.dart' show TicTacMessageActionsOptions;
+// Widget layer
+export 'src/tictac/tictac_chat.dart' show TicTacChat;
+export 'src/tictac/typing_dots.dart' show TicTacTypingDots, TicTacTypingDotsOptions;
+export 'src/tictac/message_actions.dart'
+    show TicTacMessageActionsOptions, TicTacMessageActionItem, showTicTacMessageActions;
+export 'src/tictac/user_avatar.dart' show TicTacUserAvatar;
+export 'src/tictac/topic_avatar.dart' show TicTacTopicAvatar, TicTacTopicAvatarMember;

@@ -1,6 +1,7 @@
 import 'dart:async';
 
-import 'package:test/test.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_chat_types/flutter_chat_types.dart' as types;
 import 'package:tictac/tictac.dart';
 
 /// Integration tests for TicTac against a live Tinode server.
@@ -176,13 +177,17 @@ void main() {
       final topic = await module.createGroupTopic('sendmsg-test', []);
       final controller = await module.joinTopic(topic.id);
 
-      await controller.sendMessage('hello from integration test');
+      await controller.sendMessage(
+        const types.PartialText(text: 'hello from integration test'),
+      );
 
       // Wait for message to be processed
       await Future.delayed(Duration(seconds: 1));
 
       expect(controller.messages, isNotEmpty);
-      expect(controller.messages.first.text, equals('hello from integration test'));
+      final first = controller.messages.first;
+      expect(first, isA<types.TextMessage>());
+      expect((first as types.TextMessage).text, equals('hello from integration test'));
 
       await module.deleteTopic(topic.id, hard: true);
       await module.disconnect();
@@ -198,8 +203,8 @@ void main() {
 
       await controller.sendCustomMessage(
         'game_invite',
-        '{"gameId":"abc123"}',
-        'Game invite!',
+        {'gameId': 'abc123'},
+        fallbackText: 'Game invite!',
       );
 
       await Future.delayed(Duration(seconds: 1));
@@ -218,12 +223,15 @@ void main() {
       final topic = await module.createGroupTopic('echo-test', []);
       final controller = await module.joinTopic(topic.id);
 
-      await controller.sendMessage('echo ping');
+      await controller.sendMessage(
+        const types.PartialText(text: 'echo ping'),
+      );
 
       // Wait for echo to arrive and be processed
       await Future.delayed(Duration(seconds: 3));
 
-      final hasMessage = controller.messages.any((m) => m.text == 'echo ping');
+      final hasMessage = controller.messages.any((m) =>
+          m is types.TextMessage && m.text == 'echo ping');
       expect(hasMessage, isTrue, reason: 'Should have echo ping in messages');
 
       await module.deleteTopic(topic.id, hard: true);

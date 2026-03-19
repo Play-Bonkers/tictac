@@ -1,44 +1,74 @@
 import 'dart:async';
-import 'dart:convert';
+import 'package:flutter/foundation.dart' show ChangeNotifier, debugPrint;
+import 'package:flutter_chat_types/flutter_chat_types.dart' as types;
+import 'package:uuid/uuid.dart';
 
 import 'package:tictac/tinode.dart' as tinode;
 import 'package:tictac/src/tictac/identity/identity_resolver.dart';
+
+const _uuid = Uuid();
 
 /// Per-topic state manager for TicTac.
 ///
 /// Wraps a Tinode Topic and provides a clean API for sending messages,
 /// tracking members, typing indicators, and read receipts.
 ///
-/// In a Flutter app, extend this with ChangeNotifier (or use with
-/// ValueNotifier/Stream) for reactive UI updates.
+/// Messages are stored as [types.Message] (flutter_chat_types) natively —
+/// conversion from Tinode DataMessage happens once on arrival.
 ///
-/// No Tinode types are exposed in the public API.
-class TopicController {
+/// Extends [ChangeNotifier] for reactive Flutter UI updates.
+class TopicController extends ChangeNotifier {
   final String topicId;
   final String userId;
   final IdentityResolver identityResolver;
+  final types.User Function(String userId)? userResolver;
+
+  static const _typingPlaceholderPrefix = 'typing-placeholder-';
+
+  static String _typingPlaceholderId(String userId) =>
+      '$_typingPlaceholderPrefix$userId';
+
+  static bool isTypingPlaceholder(types.Message msg) =>
+      msg is types.CustomMessage &&
+      msg.metadata != null &&
+      msg.metadata!['type'] == 'typing';
 
   tinode.Topic? _topic;
   bool _connected = false;
+  late final types.User _user;
 
   // Message list (newest first for display)
-  final List<ChatMessage> _messages = [];
-  List<ChatMessage> get messages => List.unmodifiable(_messages);
+  final List<types.Message> _messages = [];
+  List<types.Message> get messages => List.unmodifiable(_messages);
+
+  /// ID of the newest real message (first non-placeholder in list).
+  String? get lastMessageId {
+    for (final m in _messages) {
+      if (!isTypingPlaceholder(m)) return m.id;
+    }
+    return null;
+  }
 
   // Member tracking
-  final Map<String, ChatMember> _memberMap = {};
-  Map<String, ChatMember> get memberMap => Map.unmodifiable(_memberMap);
+  final Map<String, types.User> _memberMap = {};
+  Map<String, types.User> get memberMap => Map.unmodifiable(_memberMap);
 
-  // Pending outbound messages (buffered when disconnected)
-  final List<_PendingMessage> _pendingOutbound = [];
+  // Presence tracking
+  final Map<String, bool> _presenceMap = {};
+  Map<String, bool> get presenceMap => Map.unmodifiable(_presenceMap);
+  bool isOnline(String userId) => _presenceMap[userId] ?? false;
 
   // Typing state
-  Timer? _typingClearTimer;
-  String? _typingUserId;
-  String? get typingUserId => _typingUserId;
+  final List<types.User> _typingUsers = [];
+  List<types.User> get typingUsers => List.unmodifiable(_typingUsers);
+  final Map<String, Timer> _typingTimers = {};
 
-  // Change notification callback (replaces ChangeNotifier for pure Dart)
-  void Function()? onChanged;
+  // Pending outbound messages (buffered when disconnected)
+  final Set<String> _pendingClientIds = {};
+  final List<_PendingMessage> _pendingOutbound = [];
+
+  // Read receipt tracking
+  String? _lastReadMessageId;
 
   // Stream subscriptions
   StreamSubscription? _dataSub;
@@ -50,8 +80,15 @@ class TopicController {
     required this.topicId,
     required this.userId,
     required this.identityResolver,
-    this.onChanged,
-  });
+    this.userResolver,
+  }) {
+    _user = _resolveUser(userId);
+  }
+
+  types.User _resolveUser(String id) {
+    if (userResolver != null) return userResolver!(id);
+    return types.User(id: id);
+  }
 
   /// Attach to a Tinode topic and start listening for events.
   void attachToTopic(tinode.Topic topic) {
@@ -77,8 +114,16 @@ class TopicController {
     _connected = connected;
     if (connected) {
       _flushPendingOutbound();
+    } else {
+      // Clear stale typing state on disconnect
+      for (final timer in _typingTimers.values) {
+        timer.cancel();
+      }
+      _typingTimers.clear();
+      _typingUsers.clear();
+      _messages.removeWhere(isTypingPlaceholder);
+      notifyListeners();
     }
-    _notifyChanged();
   }
 
   // ---------------------------------------------------------------------------
@@ -86,83 +131,147 @@ class TopicController {
   // ---------------------------------------------------------------------------
 
   /// Send a text message.
-  Future<void> sendMessage(String text) async {
+  Future<void> sendMessage(types.PartialText partial) async {
     if (_topic == null) return;
 
-    final msg = _topic!.createMessage(text, true);
+    final clientId = _uuid.v4();
 
-    // Optimistic insert
-    _messages.insert(0, ChatMessage(
-      id: 'pending-${DateTime.now().millisecondsSinceEpoch}',
-      text: text,
-      authorId: userId,
-      timestamp: DateTime.now(),
-      status: MessageStatus.sending,
-    ));
-    _notifyChanged();
+    final optimistic = types.TextMessage(
+      id: clientId,
+      author: _user,
+      text: partial.text,
+      createdAt: DateTime.now().millisecondsSinceEpoch,
+      status: types.Status.sending,
+    );
+    _messages.insert(0, optimistic);
+    _pendingClientIds.add(clientId);
+    notifyListeners();
 
     if (!_connected) {
-      _pendingOutbound.add(_PendingMessage(text: text));
+      _pendingOutbound.add(_PendingMessage(clientId: clientId, partial: partial));
       return;
     }
 
-    try {
-      await _topic!.publishMessage(msg);
-      // The server echo arrives via onData → _handleData, which will
-      // replace the optimistic message (matched by text + sending status).
-    } catch (e) {
-      if (_messages.isNotEmpty && _messages[0].status == MessageStatus.sending) {
-        _messages[0] = _messages[0].copyWith(status: MessageStatus.error);
-        _notifyChanged();
+    _sendTextToServer(clientId, partial);
+  }
+
+  void _sendTextToServer(String clientId, types.PartialText partial) {
+    final msg = _topic!.createMessage(partial.text, true);
+    _topic!.publishMessage(msg).then((_) {
+      // Server echo arrives via onData → _handleData, which replaces optimistic
+    }).catchError((e) {
+      _pendingClientIds.remove(clientId);
+      debugPrint('TicTac: Send error: $e');
+      // Mark optimistic message as error
+      final idx = _messages.indexWhere((m) => m.id == clientId);
+      if (idx >= 0) {
+        final orig = _messages[idx];
+        if (orig is types.TextMessage) {
+          _messages[idx] = types.TextMessage(
+            id: orig.id,
+            author: orig.author,
+            text: orig.text,
+            createdAt: orig.createdAt,
+            status: types.Status.error,
+          );
+          notifyListeners();
+        }
       }
-    }
+    });
   }
 
   /// Send a custom-typed message with JSON payload.
   Future<void> sendCustomMessage(
     String customType,
-    String payload,
-    String fallbackText,
-  ) async {
-    final content = {
-      'customType': customType,
-      'payload': jsonDecode(payload),
-      'fallbackText': fallbackText,
-    };
+    Map<String, dynamic> payload, {
+    String? fallbackText,
+  }) async {
     if (_topic == null) return;
 
-    final msg = _topic!.createMessage(content, true);
+    final clientId = _uuid.v4();
 
-    _messages.insert(0, ChatMessage(
-      id: 'pending-${DateTime.now().millisecondsSinceEpoch}',
-      text: fallbackText,
-      authorId: userId,
-      timestamp: DateTime.now(),
-      status: MessageStatus.sending,
-      customType: customType,
-      customPayload: payload,
-    ));
-    _notifyChanged();
+    final optimistic = types.CustomMessage(
+      id: clientId,
+      author: _user,
+      createdAt: DateTime.now().millisecondsSinceEpoch,
+      status: types.Status.sending,
+      metadata: {
+        'customType': customType,
+        'payload': payload,
+        if (fallbackText != null) 'fallbackText': fallbackText,
+      },
+    );
+    _messages.insert(0, optimistic);
+    _pendingClientIds.add(clientId);
+    notifyListeners();
 
     if (!_connected) {
-      _pendingOutbound.add(_PendingMessage(content: content));
+      _pendingOutbound.add(_PendingMessage(
+        clientId: clientId,
+        customType: customType,
+        payload: payload,
+        fallbackText: fallbackText,
+      ));
       return;
     }
 
-    try {
-      await _topic!.publishMessage(msg);
-    } catch (_) {}
+    _sendCustomToServer(clientId, customType, payload, fallbackText);
+  }
+
+  void _sendCustomToServer(
+    String clientId,
+    String customType,
+    Map<String, dynamic> payload,
+    String? fallbackText,
+  ) {
+    final content = {
+      'customType': customType,
+      'payload': payload,
+      'fallbackText': fallbackText ?? '',
+    };
+    final msg = _topic!.createMessage(content, true);
+    _topic!.publishMessage(msg).then((_) {
+      // Server echo arrives via onData
+    }).catchError((e) {
+      _pendingClientIds.remove(clientId);
+      debugPrint('TicTac: Custom send error: $e');
+    });
+  }
+
+  /// Edit a message by ID.
+  void editMessage(String messageId, String newText) {
+    // Tinode doesn't have native message editing — this is a no-op placeholder.
+    // If needed, implement via custom protocol (e.g. delete + re-send, or
+    // application-level edit metadata).
+    debugPrint('TicTac: editMessage not supported by Tinode protocol');
   }
 
   /// Delete a message by seq ID.
-  Future<void> deleteMessage(int seqId) async {
+  Future<void> deleteMessage(String messageId) async {
     if (_topic == null) return;
-    await _topic!.deleteMessages(
-      [tinode.DelRange(low: seqId, hi: seqId + 1)],
-      true,
-    );
-    _messages.removeWhere((m) => m.id == seqId.toString());
-    _notifyChanged();
+
+    final seqId = int.tryParse(messageId);
+    if (seqId == null) return;
+
+    final idx = _messages.indexWhere((m) => m.id == messageId);
+    types.Message? removed;
+    if (idx >= 0) {
+      removed = _messages.removeAt(idx);
+      notifyListeners();
+    }
+
+    try {
+      await _topic!.deleteMessages(
+        [tinode.DelRange(low: seqId, hi: seqId + 1)],
+        true,
+      );
+    } catch (e) {
+      debugPrint('TicTac: Delete error: $e');
+      if (removed != null) {
+        _messages.insert(idx.clamp(0, _messages.length), removed);
+        notifyListeners();
+      }
+    }
   }
 
   /// Send a typing indicator.
@@ -173,10 +282,16 @@ class TopicController {
     }
   }
 
-  /// Mark a message as read by seq ID.
-  void markRead(int seqId) {
+  /// Mark a message as read by message ID (seq string).
+  void markRead(String messageId) {
     if (_topic == null || !_connected) return;
-    _topic!.noteRead(seqId);
+    if (messageId == _lastReadMessageId) return;
+    _lastReadMessageId = messageId;
+
+    final seqId = int.tryParse(messageId);
+    if (seqId != null) {
+      _topic!.noteRead(seqId);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -186,40 +301,87 @@ class TopicController {
   void _handleData(tinode.DataMessage? data) {
     if (data == null) return;
 
-    // Clear typing indicator if this message is from the typer
-    if (_typingUserId != null) {
-      _clearTyping();
-    }
+    _resolveAuthor(data.from).then((appUserId) {
+      final author = _resolveUser(appUserId);
+      final msgId = data.seq?.toString() ?? _uuid.v4();
+      final isOwnMessage = appUserId == userId;
 
-    // Convert to ChatMessage
-    _resolveAuthor(data.from).then((authorId) {
-      final message = ChatMessage(
-        id: data.seq?.toString() ?? '',
-        text: data.content is String ? data.content : '',
-        authorId: authorId,
-        timestamp: data.ts ?? DateTime.now(),
-        status: MessageStatus.sent,
-        customType: data.content is Map ? (data.content as Map)['customType'] : null,
-        customPayload: data.content is Map
-            ? jsonEncode((data.content as Map)['payload'])
-            : null,
+      // Skip if we already have a pending client message being replaced
+      if (_pendingClientIds.contains(msgId)) return;
+
+      // Convert to types.Message
+      final types.Message message;
+      if (data.content is Map) {
+        final map = data.content as Map;
+        if (map.containsKey('customType')) {
+          message = types.CustomMessage(
+            id: msgId,
+            author: author,
+            createdAt: data.ts?.millisecondsSinceEpoch ?? DateTime.now().millisecondsSinceEpoch,
+            status: isOwnMessage ? types.Status.sent : null,
+            metadata: {
+              'customType': map['customType'],
+              if (map['payload'] != null) 'payload': map['payload'],
+              if (map['fallbackText'] != null) 'fallbackText': map['fallbackText'],
+            },
+          );
+        } else {
+          message = types.TextMessage(
+            id: msgId,
+            author: author,
+            text: data.content.toString(),
+            createdAt: data.ts?.millisecondsSinceEpoch ?? DateTime.now().millisecondsSinceEpoch,
+            status: isOwnMessage ? types.Status.sent : null,
+          );
+        }
+      } else {
+        message = types.TextMessage(
+          id: msgId,
+          author: author,
+          text: data.content?.toString() ?? '',
+          createdAt: data.ts?.millisecondsSinceEpoch ?? DateTime.now().millisecondsSinceEpoch,
+          status: isOwnMessage ? types.Status.sent : null,
+        );
+      }
+
+      // Clear typing state and placeholder for this author
+      if (_typingUsers.any((u) => u.id == appUserId)) {
+        _typingTimers[appUserId]?.cancel();
+        _typingTimers.remove(appUserId);
+        _typingUsers.removeWhere((u) => u.id == appUserId);
+      }
+      _messages.removeWhere(
+        (m) => m.id == _typingPlaceholderId(appUserId),
       );
 
-      // Replace optimistic (pending) message if it matches by text + sending status
-      final pendingIdx = _messages.indexWhere((m) =>
-          m.status == MessageStatus.sending && m.text == message.text);
-      if (pendingIdx >= 0) {
-        _messages[pendingIdx] = message;
-      } else {
-        // Deduplicate by ID
-        final existingIdx = _messages.indexWhere((m) => m.id == message.id);
-        if (existingIdx >= 0) {
-          _messages[existingIdx] = message;
-        } else {
-          _messages.insert(0, message);
+      // Replace optimistic (pending) message if matches by author + sending status
+      if (isOwnMessage) {
+        final pendingIdx = _messages.indexWhere((m) =>
+            m.author.id == userId &&
+            m.status == types.Status.sending &&
+            _pendingClientIds.contains(m.id));
+        if (pendingIdx >= 0) {
+          _pendingClientIds.remove(_messages[pendingIdx].id);
+          _messages[pendingIdx] = message;
+          notifyListeners();
+          return;
         }
       }
-      _notifyChanged();
+
+      // Deduplicate by ID
+      final existingIdx = _messages.indexWhere((m) => m.id == message.id);
+      if (existingIdx >= 0) {
+        _messages[existingIdx] = message;
+      } else {
+        _insertInOrder(message);
+      }
+
+      // Track member
+      if (!_memberMap.containsKey(appUserId)) {
+        _memberMap[appUserId] = author;
+      }
+
+      notifyListeners();
     });
   }
 
@@ -228,10 +390,13 @@ class TopicController {
 
     if (pres.what == 'on' || pres.what == 'off') {
       final tinodeUserId = pres.src;
-      if (tinodeUserId != null && _memberMap.containsKey(tinodeUserId)) {
-        _memberMap[tinodeUserId]!.isOnline = pres.what == 'on';
-        _notifyChanged();
-      }
+      if (tinodeUserId == null) return;
+
+      identityResolver.reverseLookup(tinodeUserId).then((appUserId) {
+        final uid = appUserId ?? tinodeUserId;
+        _presenceMap[uid] = pres.what == 'on';
+        notifyListeners();
+      });
     }
   }
 
@@ -241,33 +406,33 @@ class TopicController {
     // Handle typing ("kp" = key press)
     if (info is Map && info['what'] == 'kp') {
       final from = info['from'] as String?;
-      if (from != null && from != userId) {
-        _setTyping(from);
-      }
+      if (from == null) return;
+
+      // Resolve tinode user ID to app user ID
+      identityResolver.reverseLookup(from).then((appUserId) {
+        final uid = appUserId ?? from;
+        if (uid == userId) return;
+        _setTyping(uid);
+      });
     }
   }
 
   void _handleMetaSub(tinode.TopicSubscription sub) {
     if (sub.user == null) return;
 
-    String? displayName;
+    String? appUserId;
     if (sub.public != null && sub.public is Map) {
-      displayName = (sub.public as Map)['fn'];
+      appUserId = (sub.public as Map)['appUserId'];
     }
-
-    _memberMap[sub.user!] = ChatMember(
-      tinodeUserId: sub.user!,
-      displayName: displayName,
-      isOnline: sub.online ?? false,
-    );
 
     // Seed identity resolver
-    if (sub.public != null && sub.public is Map) {
-      final appUserId = (sub.public as Map)['appUserId'];
-      if (appUserId != null && appUserId is String) {
-        identityResolver.addMapping(appUserId, sub.user!);
-      }
+    if (appUserId != null) {
+      identityResolver.addMapping(appUserId, sub.user!);
     }
+
+    final uid = appUserId ?? sub.user!;
+    _memberMap[uid] = _resolveUser(uid);
+    _presenceMap[uid] = sub.online ?? false;
   }
 
   // ---------------------------------------------------------------------------
@@ -275,17 +440,36 @@ class TopicController {
   // ---------------------------------------------------------------------------
 
   void _setTyping(String fromUserId) {
-    _typingUserId = fromUserId;
-    _notifyChanged();
+    if (!_typingUsers.any((u) => u.id == fromUserId)) {
+      final member = _memberMap[fromUserId];
+      final typingUser = member ?? types.User(id: fromUserId);
+      _typingUsers.add(typingUser);
 
-    _typingClearTimer?.cancel();
-    _typingClearTimer = Timer(const Duration(seconds: 3), _clearTyping);
+      // Insert typing placeholder message
+      final placeholderId = _typingPlaceholderId(fromUserId);
+      if (!_messages.any((m) => m.id == placeholderId)) {
+        _messages.insert(0, types.CustomMessage(
+          id: placeholderId,
+          author: typingUser,
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+          metadata: const {'type': 'typing'},
+        ));
+      }
+      notifyListeners();
+    }
+
+    _typingTimers[fromUserId]?.cancel();
+    _typingTimers[fromUserId] = Timer(const Duration(seconds: 3), () {
+      _removeTypingState(fromUserId);
+    });
   }
 
-  void _clearTyping() {
-    _typingClearTimer?.cancel();
-    _typingUserId = null;
-    _notifyChanged();
+  void _removeTypingState(String typingUserId) {
+    _typingTimers[typingUserId]?.cancel();
+    _typingTimers.remove(typingUserId);
+    _typingUsers.removeWhere((u) => u.id == typingUserId);
+    _messages.removeWhere((m) => m.id == _typingPlaceholderId(typingUserId));
+    notifyListeners();
   }
 
   // ---------------------------------------------------------------------------
@@ -293,16 +477,16 @@ class TopicController {
   // ---------------------------------------------------------------------------
 
   void _flushPendingOutbound() {
-    if (_topic == null) return;
-
-    for (final pending in _pendingOutbound) {
-      final content = pending.content ?? pending.text;
-      if (content != null) {
-        final msg = _topic!.createMessage(content, true);
-        _topic!.publishMessage(msg);
+    final pending = List.of(_pendingOutbound);
+    _pendingOutbound.clear();
+    for (final msg in pending) {
+      if (msg.isCustom) {
+        _sendCustomToServer(
+          msg.clientId, msg.customType!, msg.payload!, msg.fallbackText);
+      } else if (msg.partial != null) {
+        _sendTextToServer(msg.clientId, msg.partial!);
       }
     }
-    _pendingOutbound.clear();
   }
 
   // ---------------------------------------------------------------------------
@@ -315,16 +499,26 @@ class TopicController {
     return appUserId ?? tinodeUserId;
   }
 
-  void _notifyChanged() {
-    onChanged?.call();
+  void _insertInOrder(types.Message msg) {
+    final ts = msg.createdAt ?? 0;
+    var i = 0;
+    while (i < _messages.length && (_messages[i].createdAt ?? 0) > ts) {
+      i++;
+    }
+    _messages.insert(i, msg);
   }
 
+  @override
   void dispose() {
     _dataSub?.cancel();
     _presSub?.cancel();
     _infoSub?.cancel();
     _metaSubSub?.cancel();
-    _typingClearTimer?.cancel();
+    for (final timer in _typingTimers.values) {
+      timer.cancel();
+    }
+    _typingTimers.clear();
+    super.dispose();
   }
 }
 
@@ -332,63 +526,20 @@ class TopicController {
 // Internal models
 // ---------------------------------------------------------------------------
 
-enum MessageStatus { sending, sent, error }
-
-class ChatMessage {
-  final String id;
-  final String text;
-  final String authorId;
-  final DateTime timestamp;
-  final MessageStatus status;
-  final String? customType;
-  final String? customPayload;
-
-  ChatMessage({
-    required this.id,
-    required this.text,
-    required this.authorId,
-    required this.timestamp,
-    this.status = MessageStatus.sent,
-    this.customType,
-    this.customPayload,
-  });
-
-  ChatMessage copyWith({
-    String? id,
-    String? text,
-    String? authorId,
-    DateTime? timestamp,
-    MessageStatus? status,
-    String? customType,
-    String? customPayload,
-  }) {
-    return ChatMessage(
-      id: id ?? this.id,
-      text: text ?? this.text,
-      authorId: authorId ?? this.authorId,
-      timestamp: timestamp ?? this.timestamp,
-      status: status ?? this.status,
-      customType: customType ?? this.customType,
-      customPayload: customPayload ?? this.customPayload,
-    );
-  }
-}
-
-class ChatMember {
-  final String tinodeUserId;
-  String? displayName;
-  bool isOnline;
-
-  ChatMember({
-    required this.tinodeUserId,
-    this.displayName,
-    this.isOnline = false,
-  });
-}
-
 class _PendingMessage {
-  final String? text;
-  final dynamic content;
+  final String clientId;
+  final types.PartialText? partial;
+  final String? customType;
+  final Map<String, dynamic>? payload;
+  final String? fallbackText;
 
-  _PendingMessage({this.text, this.content});
+  _PendingMessage({
+    required this.clientId,
+    this.partial,
+    this.customType,
+    this.payload,
+    this.fallbackText,
+  });
+
+  bool get isCustom => customType != null;
 }
