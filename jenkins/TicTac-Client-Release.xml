@@ -265,7 +265,7 @@ echo "Updated pubspec.yaml version to ${VERSION}"
 git add pubspec.yaml
 git config user.name "Jenkins CI"
 git config user.email "jenkins@playbonkers.com"
-git commit -m "Release ${TAG_NAME}" || echo "No changes to commit"
+git commit -m "Release ${TAG_NAME} [ci skip]" || echo "No changes to commit"
 git push origin HEAD:main
 
 # Create and push the tag
