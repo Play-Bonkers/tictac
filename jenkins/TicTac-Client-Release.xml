@@ -1,24 +1,23 @@
 <?xml version="1.1" encoding="UTF-8"?><project>
   <actions/>
-  <description>&lt;h4&gt;TicTac Client Release - Flutter Library Publisher&lt;/h4&gt;
-&lt;p&gt;Runs tests, bumps version, and tags the &lt;code&gt;tictac&lt;/code&gt; Flutter library with automatic semver.&lt;/p&gt;
+  <description>&lt;h4&gt;TicTac Client - Build and Release&lt;/h4&gt;
+&lt;p&gt;Flutter library for Torpedo chat (Tinode integration).&lt;/p&gt;
 
-&lt;h4&gt;Pipeline Steps:&lt;/h4&gt;
+&lt;h4&gt;Auto-build (merge to main):&lt;/h4&gt;
 &lt;ol&gt;
-  &lt;li&gt;&lt;strong&gt;Version Bump&lt;/strong&gt; - Reads the latest tag, bumps based on release type (patch/minor/major), creates and pushes new tag&lt;/li&gt;
-  &lt;li&gt;&lt;strong&gt;Resolve Dependencies&lt;/strong&gt; - Runs &lt;code&gt;flutter pub get&lt;/code&gt;&lt;/li&gt;
-  &lt;li&gt;&lt;strong&gt;Static Analysis&lt;/strong&gt; - Runs &lt;code&gt;flutter analyze&lt;/code&gt;&lt;/li&gt;
-  &lt;li&gt;&lt;strong&gt;Unit Tests&lt;/strong&gt; - Runs &lt;code&gt;flutter test&lt;/code&gt; (unit tests)&lt;/li&gt;
-  &lt;li&gt;&lt;strong&gt;Integration Tests&lt;/strong&gt; - Runs integration tests against Tinode dev server&lt;/li&gt;
-  &lt;li&gt;&lt;strong&gt;Tag Release&lt;/strong&gt; - Updates pubspec version and pushes tagged commit&lt;/li&gt;
+  &lt;li&gt;Resolve dependencies&lt;/li&gt;
+  &lt;li&gt;Static analysis&lt;/li&gt;
+  &lt;li&gt;Unit tests&lt;/li&gt;
+  &lt;li&gt;Integration tests (Tinode dev server)&lt;/li&gt;
+  &lt;li&gt;Smoke tests&lt;/li&gt;
 &lt;/ol&gt;
 
-&lt;h4&gt;Trigger:&lt;/h4&gt;
-&lt;p&gt;Auto-triggers on merge to main (runs tests only). Manual trigger with release type to bump version and tag.&lt;/p&gt;
+&lt;h4&gt;Manual release (Build with Parameters):&lt;/h4&gt;
+&lt;p&gt;Same as above, plus version bump and git tag.&lt;/p&gt;
 
 &lt;h4&gt;Links:&lt;/h4&gt;
 &lt;ul&gt;
-  &lt;li&gt;&lt;strong&gt;Repo:&lt;/strong&gt; &lt;a href="https://github.com/Play-Bonkers/tictac"&gt;tictac&lt;/a&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;a href="https://github.com/Play-Bonkers/tictac"&gt;tictac repo&lt;/a&gt;&lt;/li&gt;
 &lt;/ul&gt;</description>
   <keepDependencies>false</keepDependencies>
   <properties>
@@ -33,9 +32,10 @@
       <parameterDefinitions>
         <hudson.model.ChoiceParameterDefinition>
           <name>RELEASE_TYPE</name>
-          <description>&lt;b&gt;patch&lt;/b&gt; (v1.2.3 -&amp;gt; v1.2.4)&lt;br/&gt;Bug fixes, small tweaks. Backwards-compatible.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;minor&lt;/b&gt; (v1.2.3 -&amp;gt; v1.3.0)&lt;br/&gt;New features, new API methods. Backwards-compatible additions.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;major&lt;/b&gt; (v1.2.3 -&amp;gt; v2.0.0)&lt;br/&gt;Breaking changes. Existing consumers MUST update.</description>
+          <description>Leave as &lt;b&gt;none&lt;/b&gt; for test-only builds (auto-trigger default).&lt;br/&gt;&lt;br/&gt;&lt;b&gt;patch&lt;/b&gt; (v1.2.3 -&amp;gt; v1.2.4) - Bug fixes&lt;br/&gt;&lt;b&gt;minor&lt;/b&gt; (v1.2.3 -&amp;gt; v1.3.0) - New features&lt;br/&gt;&lt;b&gt;major&lt;/b&gt; (v1.2.3 -&amp;gt; v2.0.0) - Breaking changes</description>
           <choices class="java.util.Arrays$ArrayList">
             <a class="string-array">
+              <string>none</string>
               <string>patch</string>
               <string>minor</string>
               <string>major</string>
@@ -81,72 +81,24 @@
       <command>#!/bin/bash
 set -e
 
-echo "=========================================="
-echo "TicTac Client Release Pipeline"
-echo "=========================================="
+export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
 
-export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/go/bin:$PATH"
-
-# Set up git auth using GITHUB_TOKEN
-git remote set-url origin "https://${GITHUB_TOKEN}@github.com/Play-Bonkers/tictac.git"
-
-# Fetch all tags from remote
-git fetch --tags --prune --prune-tags
-
-# Find latest semver tag (vX.Y.Z)
-LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-
-if [ -z "$LATEST_TAG" ]; then
-    echo "No existing semver tags found, starting at v0.0.0"
-    LATEST_TAG="v0.0.0"
+IS_RELEASE="false"
+if [ "${RELEASE_TYPE}" != "none" ] &amp;&amp; [ -n "${RELEASE_TYPE}" ]; then
+    IS_RELEASE="true"
 fi
 
-echo "Latest tag: ${LATEST_TAG}"
-echo "Release type: ${RELEASE_TYPE}"
-
-# Parse version components
-VERSION="${LATEST_TAG#v}"
-IFS='.' read -r MAJOR MINOR PATCH &lt;&lt;&lt; "$VERSION"
-
-# Bump based on release type
-case "${RELEASE_TYPE}" in
-    major)
-        MAJOR=$((MAJOR + 1))
-        MINOR=0
-        PATCH=0
-        ;;
-    minor)
-        MINOR=$((MINOR + 1))
-        PATCH=0
-        ;;
-    patch)
-        PATCH=$((PATCH + 1))
-        ;;
-    *)
-        echo "ERROR: Invalid RELEASE_TYPE '${RELEASE_TYPE}'"
-        exit 1
-        ;;
-esac
-
-NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-TAG_NAME="v${NEW_VERSION}"
-
-echo "=========================================="
-echo "Version bump: ${LATEST_TAG} -&gt; ${TAG_NAME} (${RELEASE_TYPE})"
-echo "Build: ${BUILD_NUMBER}"
-echo "=========================================="
-
-# On webhook trigger RELEASE_TYPE defaults to "patch" but we skip tagging
-# Set AUTO_BUILD flag if triggered by webhook (no user interaction)
-if [ -z "${BUILD_CAUSE}" ] || echo "${BUILD_CAUSE}" | grep -qi "github"; then
-    AUTO_BUILD=true
+if [ "$IS_RELEASE" = "true" ]; then
+    echo "=========================================="
+    echo "TicTac Release Build (${RELEASE_TYPE})"
+    echo "=========================================="
 else
-    AUTO_BUILD=false
+    echo "=========================================="
+    echo "TicTac CI Build (tests only)"
+    echo "=========================================="
 fi
 
-echo "TAG_NAME=${TAG_NAME}" &gt; env.properties
-echo "VERSION=${NEW_VERSION}" &gt;&gt; env.properties
-echo "AUTO_BUILD=${AUTO_BUILD}" &gt;&gt; env.properties</command>
+echo "IS_RELEASE=${IS_RELEASE}" &gt; env.properties</command>
       <configuredLocalRules/>
     </hudson.tasks.Shell>
     <EnvInjectBuilder plugin="envinject@2.926.v69c9b_3896a_96">
@@ -165,7 +117,6 @@ echo "Resolve Dependencies"
 echo "=========================================="
 
 cd $WORKSPACE
-
 flutter pub get
 
 echo "Dependencies resolved"</command>
@@ -182,7 +133,6 @@ echo "Static Analysis"
 echo "=========================================="
 
 cd $WORKSPACE
-
 flutter analyze --no-fatal-infos --no-fatal-warnings lib/
 
 echo "Static analysis passed"</command>
@@ -199,7 +149,6 @@ echo "Unit Tests"
 echo "=========================================="
 
 cd $WORKSPACE
-
 flutter test test/tinode_test.dart test/models/access-mode_test.dart test/services/cache-manager_test.dart test/services/auth_test.dart
 
 echo "Unit tests passed"</command>
@@ -216,7 +165,6 @@ echo "Integration Tests (Tinode Dev Server)"
 echo "=========================================="
 
 cd $WORKSPACE
-
 flutter test test/integration/tictac_integration_test.dart --timeout 120s
 
 echo "Integration tests passed"</command>
@@ -233,7 +181,6 @@ echo "Smoke Tests (Tinode Dev Server)"
 echo "=========================================="
 
 cd $WORKSPACE
-
 flutter test test/smoke/tinode_smoke_test.dart --timeout 60s || echo "Smoke tests completed (some may be expected failures)"
 
 echo "Smoke tests done"</command>
@@ -245,37 +192,53 @@ set -e
 
 export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
 
-echo "=========================================="
-echo "Tag Release: ${TAG_NAME}"
-echo "=========================================="
-
-if [ "${AUTO_BUILD}" = "true" ]; then
-    echo "Auto-build (webhook trigger) -- skipping version bump and tag."
-    echo "To release, trigger manually with a RELEASE_TYPE."
+# Skip release step unless manually triggered with a release type
+if [ "${IS_RELEASE}" != "true" ]; then
+    echo "=========================================="
+    echo "CI build complete -- all tests passed"
+    echo "=========================================="
     exit 0
 fi
 
+echo "=========================================="
+echo "Release: computing version"
+echo "=========================================="
+
 cd $WORKSPACE
 
-# Update version in pubspec.yaml
-sed -i "" "s/^version: .*/version: ${VERSION}/" pubspec.yaml
-echo "Updated pubspec.yaml version to ${VERSION}"
+# Set up git auth
+git remote set-url origin "https://${GITHUB_TOKEN}@github.com/Play-Bonkers/tictac.git"
+git fetch --tags --prune --prune-tags
 
-# Commit version bump
-git add pubspec.yaml
+# Find latest semver tag
+LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+if [ -z "$LATEST_TAG" ]; then
+    LATEST_TAG="v0.0.0"
+fi
+
+VERSION="${LATEST_TAG#v}"
+IFS='.' read -r MAJOR MINOR PATCH &lt;&lt;&lt; "$VERSION"
+
+case "${RELEASE_TYPE}" in
+    major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+    minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+    patch) PATCH=$((PATCH + 1)) ;;
+esac
+
+NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+TAG_NAME="v${NEW_VERSION}"
+
+echo "${LATEST_TAG} -> ${TAG_NAME} (${RELEASE_TYPE})"
+
+# Tag only -- no commit to main (avoids webhook loop)
 git config user.name "Jenkins CI"
 git config user.email "jenkins@playbonkers.com"
-git commit -m "Release ${TAG_NAME} [ci skip]" || echo "No changes to commit"
-git push origin HEAD:main
-
-# Create and push the tag
 git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
 git push origin "${TAG_NAME}"
 
 echo "=========================================="
-echo "Released successfully!"
-echo "Repo: https://github.com/Play-Bonkers/tictac"
-echo "Tag: ${TAG_NAME}"
+echo "Released ${TAG_NAME}"
+echo "https://github.com/Play-Bonkers/tictac/releases/tag/${TAG_NAME}"
 echo "=========================================="</command>
       <configuredLocalRules/>
     </hudson.tasks.Shell>
@@ -307,31 +270,17 @@ echo "=========================================="</command>
       <artifactIncludes/>
       <commitInfoChoice>AUTHORS_AND_TITLES</commitInfoChoice>
       <includeCustomMessage>true</includeCustomMessage>
-      <customMessage>*TicTac Client Release*
-*Release:* ${RELEASE_TYPE} -&gt; ${TAG_NAME}
-*Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt;
-*Console:* &lt;${BUILD_URL}console|View Logs&gt;</customMessage>
-      <customMessageSuccess>*TicTac Client Release*
-*Release:* ${RELEASE_TYPE} -&gt; ${TAG_NAME}
-*Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :white_check_mark:
-*Console:* &lt;${BUILD_URL}console|View Logs&gt;
-*Status:* Published to &lt;https://github.com/Play-Bonkers/tictac|tictac&gt;</customMessageSuccess>
-      <customMessageAborted>*TicTac Client Release*
-*Release:* ${RELEASE_TYPE} -&gt; ${TAG_NAME}
-*Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :no_entry:
-*Console:* &lt;${BUILD_URL}console|View Logs&gt;
-*Status:* Aborted</customMessageAborted>
+      <customMessage>*TicTac* #${BUILD_NUMBER}
+&lt;${BUILD_URL}console|View Logs&gt;</customMessage>
+      <customMessageSuccess>*TicTac* #${BUILD_NUMBER} :white_check_mark:
+&lt;${BUILD_URL}console|View Logs&gt;</customMessageSuccess>
+      <customMessageAborted>*TicTac* #${BUILD_NUMBER} :no_entry: Aborted
+&lt;${BUILD_URL}console|View Logs&gt;</customMessageAborted>
       <customMessageNotBuilt/>
-      <customMessageUnstable>*TicTac Client Release*
-*Release:* ${RELEASE_TYPE} -&gt; ${TAG_NAME}
-*Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :warning:
-*Console:* &lt;${BUILD_URL}console|View Logs&gt;
-*Status:* Unstable (some tests failed)</customMessageUnstable>
-      <customMessageFailure>*TicTac Client Release*
-*Release:* ${RELEASE_TYPE} -&gt; ${TAG_NAME}
-*Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :x:
-*Console:* &lt;${BUILD_URL}console|View Logs&gt;
-*Status:* FAILED</customMessageFailure>
+      <customMessageUnstable>*TicTac* #${BUILD_NUMBER} :warning: Unstable
+&lt;${BUILD_URL}console|View Logs&gt;</customMessageUnstable>
+      <customMessageFailure>*TicTac* #${BUILD_NUMBER} :x: FAILED
+&lt;${BUILD_URL}console|View Logs&gt;</customMessageFailure>
     </jenkins.plugins.slack.SlackNotifier>
   </publishers>
   <buildWrappers>
@@ -344,11 +293,5 @@ echo "=========================================="</command>
       </bindings>
     </org.jenkinsci.plugins.credentialsbinding.impl.SecretBuildWrapper>
     <hudson.plugins.timestamper.TimestamperBuildWrapper plugin="timestamper@1.28"/>
-    <org.jenkinsci.plugins.buildnamesetter.BuildNameSetter plugin="build-name-setter@2.5.1">
-      <template>#${BUILD_NUMBER} - ${TAG_NAME}</template>
-      <descriptionTemplate>${RELEASE_TYPE} release -&gt; ${TAG_NAME}</descriptionTemplate>
-      <runAtStart>false</runAtStart>
-      <runAtEnd>true</runAtEnd>
-    </org.jenkinsci.plugins.buildnamesetter.BuildNameSetter>
   </buildWrappers>
 </project>
