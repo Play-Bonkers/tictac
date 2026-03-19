@@ -237,6 +237,7 @@ git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
 git push origin "${TAG_NAME}"
 
 echo "=========================================="
+echo "BUILD_DISPLAY=#${BUILD_NUMBER} ${TAG_NAME}" > env.properties
 echo "Released ${TAG_NAME}"
 echo "https://github.com/Play-Bonkers/tictac/releases/tag/${TAG_NAME}"
 echo "=========================================="</command>
@@ -293,5 +294,11 @@ echo "=========================================="</command>
       </bindings>
     </org.jenkinsci.plugins.credentialsbinding.impl.SecretBuildWrapper>
     <hudson.plugins.timestamper.TimestamperBuildWrapper plugin="timestamper@1.28"/>
+    <org.jenkinsci.plugins.buildnamesetter.BuildNameSetter plugin="build-name-setter@2.5.1">
+      <template>${BUILD_DISPLAY}</template>
+      <descriptionTemplate/>
+      <runAtStart>false</runAtStart>
+      <runAtEnd>true</runAtEnd>
+    </org.jenkinsci.plugins.buildnamesetter.BuildNameSetter>
   </buildWrappers>
 </project>
