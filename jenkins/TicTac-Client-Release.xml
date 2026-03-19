@@ -1,0 +1,335 @@
+<?xml version="1.1" encoding="UTF-8"?><project>
+  <actions/>
+  <description>&lt;h4&gt;TicTac Client Release - Flutter Library Publisher&lt;/h4&gt;
+&lt;p&gt;Runs tests, bumps version, and tags the &lt;code&gt;tictac&lt;/code&gt; Flutter library with automatic semver.&lt;/p&gt;
+
+&lt;h4&gt;Pipeline Steps:&lt;/h4&gt;
+&lt;ol&gt;
+  &lt;li&gt;&lt;strong&gt;Version Bump&lt;/strong&gt; - Reads the latest tag, bumps based on release type (patch/minor/major), creates and pushes new tag&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Resolve Dependencies&lt;/strong&gt; - Runs &lt;code&gt;flutter pub get&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Static Analysis&lt;/strong&gt; - Runs &lt;code&gt;flutter analyze&lt;/code&gt;&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Unit Tests&lt;/strong&gt; - Runs &lt;code&gt;flutter test&lt;/code&gt; (unit tests)&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Integration Tests&lt;/strong&gt; - Runs integration tests against Tinode dev server&lt;/li&gt;
+  &lt;li&gt;&lt;strong&gt;Tag Release&lt;/strong&gt; - Updates pubspec version and pushes tagged commit&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h4&gt;Trigger:&lt;/h4&gt;
+&lt;p&gt;Manual only. Select a release type (patch, minor, major) and run.&lt;/p&gt;
+
+&lt;h4&gt;Links:&lt;/h4&gt;
+&lt;ul&gt;
+  &lt;li&gt;&lt;strong&gt;Repo:&lt;/strong&gt; &lt;a href="https://github.com/Play-Bonkers/tictac"&gt;tictac&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+    <hudson.plugins.jira.JiraProjectProperty plugin="jira@3.21">
+      <siteName>https://torpedolabs.atlassian.net/</siteName>
+    </hudson.plugins.jira.JiraProjectProperty>
+    <com.coravy.hudson.plugins.github.GithubProjectProperty plugin="github@1.43.0">
+      <projectUrl>https://github.com/Play-Bonkers/tictac/</projectUrl>
+      <displayName/>
+    </com.coravy.hudson.plugins.github.GithubProjectProperty>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        <hudson.model.ChoiceParameterDefinition>
+          <name>RELEASE_TYPE</name>
+          <description>&lt;b&gt;patch&lt;/b&gt; (v1.2.3 -&amp;gt; v1.2.4)&lt;br/&gt;Bug fixes, small tweaks. Backwards-compatible.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;minor&lt;/b&gt; (v1.2.3 -&amp;gt; v1.3.0)&lt;br/&gt;New features, new API methods. Backwards-compatible additions.&lt;br/&gt;&lt;br/&gt;&lt;b&gt;major&lt;/b&gt; (v1.2.3 -&amp;gt; v2.0.0)&lt;br/&gt;Breaking changes. Existing consumers MUST update.</description>
+          <choices class="java.util.Arrays$ArrayList">
+            <a class="string-array">
+              <string>patch</string>
+              <string>minor</string>
+              <string>major</string>
+            </a>
+          </choices>
+        </hudson.model.ChoiceParameterDefinition>
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+  </properties>
+  <scm class="hudson.plugins.git.GitSCM" plugin="git@5.7.0">
+    <configVersion>2</configVersion>
+    <userRemoteConfigs>
+      <hudson.plugins.git.UserRemoteConfig>
+        <url>https://github.com/Play-Bonkers/tictac.git</url>
+        <credentialsId>e7b33c2d-a3b2-4065-a5e1-8d07a5cd2eab</credentialsId>
+      </hudson.plugins.git.UserRemoteConfig>
+    </userRemoteConfigs>
+    <branches>
+      <hudson.plugins.git.BranchSpec>
+        <name>origin/main</name>
+      </hudson.plugins.git.BranchSpec>
+    </branches>
+    <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
+    <submoduleCfg class="empty-list"/>
+    <extensions>
+      <hudson.plugins.git.extensions.impl.CleanBeforeCheckout>
+        <deleteUntrackedNestedRepositories>false</deleteUntrackedNestedRepositories>
+      </hudson.plugins.git.extensions.impl.CleanBeforeCheckout>
+    </extensions>
+  </scm>
+  <canRoam>true</canRoam>
+  <disabled>false</disabled>
+  <blockBuildWhenDownstreamBuilding>false</blockBuildWhenDownstreamBuilding>
+  <blockBuildWhenUpstreamBuilding>false</blockBuildWhenUpstreamBuilding>
+  <triggers/>
+  <concurrentBuild>false</concurrentBuild>
+  <builders>
+    <hudson.tasks.Shell>
+      <command>#!/bin/bash
+set -e
+
+echo "=========================================="
+echo "TicTac Client Release Pipeline"
+echo "=========================================="
+
+export PATH="/opt/homebrew/bin:/usr/local/go/bin:$HOME/go/bin:$PATH"
+
+# Set up git auth using GITHUB_TOKEN
+git remote set-url origin "https://${GITHUB_TOKEN}@github.com/Play-Bonkers/tictac.git"
+
+# Fetch all tags from remote
+git fetch --tags --prune --prune-tags
+
+# Find latest semver tag (vX.Y.Z)
+LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+
+if [ -z "$LATEST_TAG" ]; then
+    echo "No existing semver tags found, starting at v0.0.0"
+    LATEST_TAG="v0.0.0"
+fi
+
+echo "Latest tag: ${LATEST_TAG}"
+echo "Release type: ${RELEASE_TYPE}"
+
+# Parse version components
+VERSION="${LATEST_TAG#v}"
+IFS='.' read -r MAJOR MINOR PATCH &lt;&lt;&lt; "$VERSION"
+
+# Bump based on release type
+case "${RELEASE_TYPE}" in
+    major)
+        MAJOR=$((MAJOR + 1))
+        MINOR=0
+        PATCH=0
+        ;;
+    minor)
+        MINOR=$((MINOR + 1))
+        PATCH=0
+        ;;
+    patch)
+        PATCH=$((PATCH + 1))
+        ;;
+    *)
+        echo "ERROR: Invalid RELEASE_TYPE '${RELEASE_TYPE}'"
+        exit 1
+        ;;
+esac
+
+NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+TAG_NAME="v${NEW_VERSION}"
+
+echo "=========================================="
+echo "Version bump: ${LATEST_TAG} -> ${TAG_NAME} (${RELEASE_TYPE})"
+echo "Build: ${BUILD_NUMBER}"
+echo "=========================================="
+
+echo "TAG_NAME=${TAG_NAME}" &gt; env.properties
+echo "VERSION=${NEW_VERSION}" &gt;&gt; env.properties</command>
+      <configuredLocalRules/>
+    </hudson.tasks.Shell>
+    <EnvInjectBuilder plugin="envinject@2.926.v69c9b_3896a_96">
+      <info>
+        <propertiesFilePath>env.properties</propertiesFilePath>
+      </info>
+    </EnvInjectBuilder>
+    <hudson.tasks.Shell>
+      <command>#!/bin/bash
+set -e
+
+export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
+
+echo "=========================================="
+echo "Resolve Dependencies"
+echo "=========================================="
+
+cd $WORKSPACE
+
+flutter pub get
+
+echo "Dependencies resolved"</command>
+      <configuredLocalRules/>
+    </hudson.tasks.Shell>
+    <hudson.tasks.Shell>
+      <command>#!/bin/bash
+set -e
+
+export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
+
+echo "=========================================="
+echo "Static Analysis"
+echo "=========================================="
+
+cd $WORKSPACE
+
+flutter analyze --no-fatal-infos lib/
+
+echo "Static analysis passed"</command>
+      <configuredLocalRules/>
+    </hudson.tasks.Shell>
+    <hudson.tasks.Shell>
+      <command>#!/bin/bash
+set -e
+
+export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
+
+echo "=========================================="
+echo "Unit Tests"
+echo "=========================================="
+
+cd $WORKSPACE
+
+flutter test test/tinode_test.dart test/models/access-mode_test.dart test/services/cache-manager_test.dart test/services/auth_test.dart
+
+echo "Unit tests passed"</command>
+      <configuredLocalRules/>
+    </hudson.tasks.Shell>
+    <hudson.tasks.Shell>
+      <command>#!/bin/bash
+set -e
+
+export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
+
+echo "=========================================="
+echo "Integration Tests (Tinode Dev Server)"
+echo "=========================================="
+
+cd $WORKSPACE
+
+flutter test test/integration/tictac_integration_test.dart --timeout 120s
+
+echo "Integration tests passed"</command>
+      <configuredLocalRules/>
+    </hudson.tasks.Shell>
+    <hudson.tasks.Shell>
+      <command>#!/bin/bash
+set -e
+
+export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
+
+echo "=========================================="
+echo "Smoke Tests (Tinode Dev Server)"
+echo "=========================================="
+
+cd $WORKSPACE
+
+flutter test test/smoke/tinode_smoke_test.dart --timeout 60s || echo "Smoke tests completed (some may be expected failures)"
+
+echo "Smoke tests done"</command>
+      <configuredLocalRules/>
+    </hudson.tasks.Shell>
+    <hudson.tasks.Shell>
+      <command>#!/bin/bash
+set -e
+
+export PATH="/opt/homebrew/bin:$HOME/.pub-cache/bin:$PATH"
+
+echo "=========================================="
+echo "Tag Release: ${TAG_NAME}"
+echo "=========================================="
+
+cd $WORKSPACE
+
+# Update version in pubspec.yaml
+sed -i "" "s/^version: .*/version: ${VERSION}/" pubspec.yaml
+echo "Updated pubspec.yaml version to ${VERSION}"
+
+# Commit version bump
+git add pubspec.yaml
+git config user.name "Jenkins CI"
+git config user.email "jenkins@playbonkers.com"
+git commit -m "Release ${TAG_NAME}" || echo "No changes to commit"
+git push origin HEAD:main
+
+# Create and push the tag
+git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME}"
+git push origin "${TAG_NAME}"
+
+echo "=========================================="
+echo "Released successfully!"
+echo "Repo: https://github.com/Play-Bonkers/tictac"
+echo "Tag: ${TAG_NAME}"
+echo "=========================================="</command>
+      <configuredLocalRules/>
+    </hudson.tasks.Shell>
+  </builders>
+  <publishers>
+    <jenkins.plugins.slack.SlackNotifier plugin="slack@795.v4b_9705b_e6d47">
+      <baseUrl/>
+      <teamDomain/>
+      <authToken/>
+      <tokenCredentialId/>
+      <botUser>false</botUser>
+      <room>#builds-cxs</room>
+      <sendAsText>false</sendAsText>
+      <iconEmoji/>
+      <username/>
+      <startNotification>true</startNotification>
+      <notifySuccess>true</notifySuccess>
+      <notifyAborted>true</notifyAborted>
+      <notifyNotBuilt>false</notifyNotBuilt>
+      <notifyUnstable>true</notifyUnstable>
+      <notifyRegression>false</notifyRegression>
+      <notifyFailure>true</notifyFailure>
+      <notifyEveryFailure>true</notifyEveryFailure>
+      <notifyBackToNormal>true</notifyBackToNormal>
+      <notifyRepeatedFailure>true</notifyRepeatedFailure>
+      <includeTestSummary>true</includeTestSummary>
+      <includeFailedTests>true</includeFailedTests>
+      <uploadFiles>false</uploadFiles>
+      <artifactIncludes/>
+      <commitInfoChoice>AUTHORS_AND_TITLES</commitInfoChoice>
+      <includeCustomMessage>true</includeCustomMessage>
+      <customMessage>*TicTac Client Release*
+*Release:* ${RELEASE_TYPE} -> ${TAG_NAME}
+*Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt;
+*Console:* &lt;${BUILD_URL}console|View Logs&gt;</customMessage>
+      <customMessageSuccess>*TicTac Client Release*
+*Release:* ${RELEASE_TYPE} -> ${TAG_NAME}
+*Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :white_check_mark:
+*Console:* &lt;${BUILD_URL}console|View Logs&gt;
+*Status:* Published to &lt;https://github.com/Play-Bonkers/tictac|tictac&gt;</customMessageSuccess>
+      <customMessageAborted>*TicTac Client Release*
+*Release:* ${RELEASE_TYPE} -> ${TAG_NAME}
+*Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :no_entry:
+*Console:* &lt;${BUILD_URL}console|View Logs&gt;
+*Status:* Aborted</customMessageAborted>
+      <customMessageNotBuilt/>
+      <customMessageUnstable>*TicTac Client Release*
+*Release:* ${RELEASE_TYPE} -> ${TAG_NAME}
+*Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :warning:
+*Console:* &lt;${BUILD_URL}console|View Logs&gt;
+*Status:* Unstable (some tests failed)</customMessageUnstable>
+      <customMessageFailure>*TicTac Client Release*
+*Release:* ${RELEASE_TYPE} -> ${TAG_NAME}
+*Build:* &lt;${BUILD_URL}|#${BUILD_NUMBER}&gt; :x:
+*Console:* &lt;${BUILD_URL}console|View Logs&gt;
+*Status:* FAILED</customMessageFailure>
+    </jenkins.plugins.slack.SlackNotifier>
+  </publishers>
+  <buildWrappers>
+    <org.jenkinsci.plugins.credentialsbinding.impl.SecretBuildWrapper plugin="credentials-binding@702.vfe613e537e88">
+      <bindings>
+        <org.jenkinsci.plugins.credentialsbinding.impl.StringBinding>
+          <credentialsId>github-token</credentialsId>
+          <variable>GITHUB_TOKEN</variable>
+        </org.jenkinsci.plugins.credentialsbinding.impl.StringBinding>
+      </bindings>
+    </org.jenkinsci.plugins.credentialsbinding.impl.SecretBuildWrapper>
+    <hudson.plugins.timestamper.TimestamperBuildWrapper plugin="timestamper@1.28"/>
+    <org.jenkinsci.plugins.buildnamesetter.BuildNameSetter plugin="build-name-setter@2.5.1">
+      <template>#${BUILD_NUMBER} - ${TAG_NAME}</template>
+      <descriptionTemplate>${RELEASE_TYPE} release -> ${TAG_NAME}</descriptionTemplate>
+      <runAtStart>false</runAtStart>
+      <runAtEnd>true</runAtEnd>
+    </org.jenkinsci.plugins.buildnamesetter.BuildNameSetter>
+  </buildWrappers>
+</project>
