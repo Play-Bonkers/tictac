@@ -10,6 +10,7 @@ import 'package:tictac/src/tictac/models/topic_type.dart';
 import 'package:tictac/src/tictac/models/message_preview.dart';
 import 'package:tictac/src/tictac/identity/identity_resolver.dart';
 import 'package:tictac/src/tictac/identity/cached_identity_resolver.dart';
+import 'package:tictac/src/tictac/topic_controller.dart';
 
 /// Main entry point for TicTac chat functionality.
 ///
@@ -43,6 +44,8 @@ class TicTacModule {
   final _random = Random();
 
   final Map<String, bool> _presenceMap = {};
+  final Map<String, TopicController> _topicControllers = {};
+  final Map<String, String> _topicNames = {}; // topicId -> display name
   late IdentityResolver identityResolver;
 
   StreamSubscription? _onDisconnectSub;
@@ -118,12 +121,28 @@ class TicTacModule {
       _onSubsUpdatedSub?.cancel();
       _onSubsUpdatedSub = me.onSubsUpdated.listen(_handleSubsUpdated);
 
+      // Wait for subscription data to arrive from server
+      final subsReady = Completer<void>();
+      late StreamSubscription subsSub;
+      subsSub = me.onSubsUpdated.listen((_) {
+        if (!subsReady.isCompleted) subsReady.complete();
+        subsSub.cancel();
+      });
+
       await me.subscribe(
         tinode.MetaGetBuilder(me).withLaterSub(null).build(),
         null,
       );
 
-      // Build topic list from "me" contacts
+      // Wait for subs data or timeout (new users may have no contacts)
+      await subsReady.future.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {
+          subsSub.cancel();
+        },
+      );
+
+      // Build topic list from fresh server data
       final topics = await _buildTopicList(me);
 
       // Reset reconnect state on success
@@ -150,6 +169,7 @@ class TicTacModule {
     _tinode?.disconnect();
     _tinode = null;
     _presenceMap.clear();
+    _topicNames.clear();
   }
 
   /// Force a reconnection (resets backoff state).
@@ -198,11 +218,38 @@ class TicTacModule {
   // Topic operations
   // ---------------------------------------------------------------------------
 
-  /// Get the current list of topics from the "me" subscription.
+  /// Get the current list of topics from the server.
+  /// Always fetches fresh data — never reads from cache.
   Future<List<tictac_models.Topic>> getTopics() async {
     if (_tinode == null) throw StateError('Not connected');
 
     final me = _tinode!.getMeTopic();
+
+    // Clear stale contacts before fetching fresh data
+    me.clearContacts();
+
+    // Wait for fresh subscription data from the server
+    final completer = Completer<void>();
+    late StreamSubscription sub;
+    sub = me.onSubsUpdated.listen((_) {
+      if (!completer.isCompleted) completer.complete();
+      sub.cancel();
+    });
+
+    // Request fresh subscriptions
+    _tinode!.getMeta(
+      'me',
+      tinode.GetQuery.fromMessage({'what': 'sub'}),
+    );
+
+    // Wait for response or timeout
+    await completer.future.timeout(
+      const Duration(seconds: 5),
+      onTimeout: () {
+        sub.cancel();
+      },
+    );
+
     return _buildTopicList(me);
   }
 
@@ -241,8 +288,11 @@ class TicTacModule {
       }
     }
 
+    final topicId = newTopic.name!;
+    _topicNames[topicId] = name;
+
     return tictac_models.Topic(
-      id: newTopic.name!,
+      id: topicId,
       name: name,
       type: TopicType.group,
       memberAppUserIds: [config.appUserId, ...memberAppUserIds],
@@ -264,24 +314,59 @@ class TicTacModule {
       null,
     );
 
+    final topicId = p2pTopic.name!;
+    _topicNames[topicId] = otherAppUserId;
+
     return tictac_models.Topic(
-      id: p2pTopic.name!,
+      id: topicId,
       name: otherAppUserId,
       type: TopicType.direct,
       memberAppUserIds: [config.appUserId, otherAppUserId],
     );
   }
 
+  /// Join a topic and return a TopicController for interacting with it.
+  Future<TopicController> joinTopic(String topicId) async {
+    if (_tinode == null) throw StateError('Not connected');
+
+    // Return existing controller if already joined
+    if (_topicControllers.containsKey(topicId)) {
+      return _topicControllers[topicId]!;
+    }
+
+    final topic = _tinode!.getTopic(topicId);
+    await topic.subscribe(
+      tinode.MetaGetBuilder(topic)
+          .withLaterData(config.recentMessages)
+          .withLaterSub(null)
+          .build(),
+      null,
+    );
+
+    final controller = TopicController(
+      topicId: topicId,
+      userId: config.appUserId,
+      identityResolver: identityResolver,
+    );
+    controller.attachToTopic(topic);
+    _topicControllers[topicId] = controller;
+    return controller;
+  }
+
   /// Delete a topic.
   Future<void> deleteTopic(String topicId, {bool hard = false}) async {
     if (_tinode == null) throw StateError('Not connected');
     await _tinode!.deleteTopic(topicId, hard);
+    final controller = _topicControllers.remove(topicId);
+    controller?.dispose();
   }
 
   /// Leave a topic (detach without deleting).
   Future<void> leaveTopic(String topicId) async {
     if (_tinode == null) throw StateError('Not connected');
     await _tinode!.leave(topicId, false);
+    final controller = _topicControllers.remove(topicId);
+    controller?.dispose();
   }
 
   // ---------------------------------------------------------------------------
@@ -397,10 +482,34 @@ class TicTacModule {
       final isGroup = tinode.Tools.isGroupTopicName(topicName);
       if (!isP2P && !isGroup) continue;
 
-      // Resolve name
-      String? displayName;
-      if (sub.public != null && sub.public is Map) {
+      // Resolve display name:
+      // 1. Check local name map (set during createGroupTopic/createDirectTopic)
+      // 2. Check subscription's public field (user's display name for P2P)
+      // 3. For group topics, fetch topic description from server
+      String? displayName = _topicNames[topicName];
+      if (displayName == null && sub.public != null && sub.public is Map) {
         displayName = (sub.public as Map)['fn'];
+      }
+      if (displayName == null && isGroup) {
+        // Fetch topic description from server for the group name
+        try {
+          final topic = _tinode!.getTopic(topicName);
+          // Check if the topic already has cached desc
+          if (topic.public != null && topic.public is Map) {
+            displayName = (topic.public as Map)['fn'];
+          }
+          // If not, subscribe briefly to get the desc
+          if (displayName == null) {
+            await topic.subscribe(
+              tinode.MetaGetBuilder(topic).withDesc(null).build(),
+              null,
+            );
+            if (topic.public != null && topic.public is Map) {
+              displayName = (topic.public as Map)['fn'];
+            }
+            await topic.leave(false);
+          }
+        } catch (_) {}
       }
 
       // Build last message preview if available

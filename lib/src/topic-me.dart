@@ -350,6 +350,12 @@ class TopicMe extends Topic {
     return _contacts.values.toList();
   }
 
+  /// Clear all cached contacts. Call before requesting fresh subscription
+  /// data to ensure stale entries are removed.
+  void clearContacts() {
+    _contacts.clear();
+  }
+
   /// Update a cached contact with new read/received/message count
   void setMsgReadRecv(String contactName, String what, int seq, DateTime? ts) {
     var cont = _contacts[contactName];

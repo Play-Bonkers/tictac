@@ -107,20 +107,10 @@ class TopicController {
     }
 
     try {
-      final ctrl = await _topic!.publishMessage(msg);
-      // Update optimistic message with server data
-      if (ctrl != null && _messages.isNotEmpty) {
-        final pending = _messages[0];
-        if (pending.status == MessageStatus.sending) {
-          _messages[0] = pending.copyWith(
-            id: ctrl.params?['seq']?.toString() ?? pending.id,
-            status: MessageStatus.sent,
-          );
-          _notifyChanged();
-        }
-      }
+      await _topic!.publishMessage(msg);
+      // The server echo arrives via onData → _handleData, which will
+      // replace the optimistic message (matched by text + sending status).
     } catch (e) {
-      // Mark as failed
       if (_messages.isNotEmpty && _messages[0].status == MessageStatus.sending) {
         _messages[0] = _messages[0].copyWith(status: MessageStatus.error);
         _notifyChanged();
@@ -215,12 +205,19 @@ class TopicController {
             : null,
       );
 
-      // Deduplicate
-      final existingIdx = _messages.indexWhere((m) => m.id == message.id);
-      if (existingIdx >= 0) {
-        _messages[existingIdx] = message;
+      // Replace optimistic (pending) message if it matches by text + sending status
+      final pendingIdx = _messages.indexWhere((m) =>
+          m.status == MessageStatus.sending && m.text == message.text);
+      if (pendingIdx >= 0) {
+        _messages[pendingIdx] = message;
       } else {
-        _messages.insert(0, message);
+        // Deduplicate by ID
+        final existingIdx = _messages.indexWhere((m) => m.id == message.id);
+        if (existingIdx >= 0) {
+          _messages[existingIdx] = message;
+        } else {
+          _messages.insert(0, message);
+        }
       }
       _notifyChanged();
     });
