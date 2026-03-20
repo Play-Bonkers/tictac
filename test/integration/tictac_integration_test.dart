@@ -103,7 +103,7 @@ void main() {
       moduleA.identityResolver.addMapping(
         userIdB,
         // Get B's tinode user ID from moduleB's identity resolver
-        (await moduleB.identityResolver.resolve(userIdB)) ??
+        (await moduleB.identityResolver.lookup(userIdB)) ??
             // If not resolved, we need B's tinode ID from login
             '',
       );
@@ -111,7 +111,7 @@ void main() {
       // For direct topics, we need the target's tinode user ID.
       // In phase 1, this requires manual seeding or prior contact.
       // Skip if we can't resolve — this validates the identity flow.
-      final bTinodeId = await moduleA.identityResolver.resolve(userIdB);
+      final bTinodeId = await moduleA.identityResolver.lookup(userIdB);
       if (bTinodeId != null && bTinodeId.isNotEmpty) {
         final topic = await moduleA.createDirectTopic(userIdB);
         expect(topic.id, isNotEmpty);
@@ -311,7 +311,7 @@ void main() {
       final module = TicTacModule(makeConfig(userId));
       await module.connect();
 
-      final tinodeId = await module.identityResolver.resolve(userId);
+      final tinodeId = await module.identityResolver.lookup(userId);
       expect(tinodeId, isNotNull);
       expect(tinodeId, isNotEmpty);
       expect(tinodeId!.startsWith('usr'), isTrue,
@@ -341,14 +341,14 @@ void main() {
       // Seed identity resolvers
       moduleA.identityResolver.addMapping(
         userIdB,
-        (await moduleB.identityResolver.resolve(userIdB)) ?? '',
+        (await moduleB.identityResolver.lookup(userIdB)) ?? '',
       );
       moduleB.identityResolver.addMapping(
         userIdA,
-        (await moduleA.identityResolver.resolve(userIdA)) ?? '',
+        (await moduleA.identityResolver.lookup(userIdA)) ?? '',
       );
 
-      final bTinodeId = await moduleA.identityResolver.resolve(userIdB);
+      final bTinodeId = await moduleA.identityResolver.lookup(userIdB);
       if (bTinodeId == null || bTinodeId.isEmpty) {
         await moduleA.disconnect();
         await moduleB.disconnect();
@@ -431,10 +431,10 @@ void main() {
       // Seed identity so A knows B
       moduleA.identityResolver.addMapping(
         userIdB,
-        (await moduleB.identityResolver.resolve(userIdB)) ?? '',
+        (await moduleB.identityResolver.lookup(userIdB)) ?? '',
       );
 
-      final bTinodeId = await moduleA.identityResolver.resolve(userIdB);
+      final bTinodeId = await moduleA.identityResolver.lookup(userIdB);
       if (bTinodeId == null || bTinodeId.isEmpty) {
         await moduleA.disconnect();
         await moduleB.disconnect();
@@ -484,7 +484,7 @@ void main() {
       expect(module2.isConnected, isTrue);
 
       // Verify identity is still intact
-      final tinodeId = await module2.identityResolver.resolve(userId);
+      final tinodeId = await module2.identityResolver.lookup(userId);
       expect(tinodeId, isNotNull);
       expect(tinodeId, isNotEmpty);
 
@@ -519,6 +519,151 @@ void main() {
 
       await module2.deleteTopic(createdId, hard: true);
       await module2.disconnect();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // TagsIdentityResolver tests (TAGS + TAILS live)
+  // -------------------------------------------------------------------------
+
+  group('TagsIdentityResolver', () {
+    const tagsBaseUrl = 'https://dev-tags.playbonkers.com';
+
+    TicTacConfig makeTagsConfig(String appUserId) {
+      return TicTacConfig(
+        tinodeHost: tinodeHost,
+        tinodePort: tinodePort,
+        appUserId: appUserId,
+        appId: appId,
+        appKey: appKey,
+        sessionId: 'test-session',
+        generateRequestId: () => 'req-${DateTime.now().millisecondsSinceEpoch}',
+        tagsBaseUrl: tagsBaseUrl,
+      );
+    }
+
+    test('uses TagsIdentityResolver when tagsBaseUrl is set', () async {
+      final userId = uniqueUserId();
+      final module = TicTacModule(makeTagsConfig(userId));
+
+      expect(module.identityResolver, isA<TagsIdentityResolver>());
+
+      await module.connect();
+      await module.disconnect();
+    });
+
+    test('lookup returns tinode user ID via TAGS', () async {
+      final userId = uniqueUserId();
+      final module = TicTacModule(makeTagsConfig(userId));
+      await module.connect();
+
+      final tinodeId = await module.identityResolver.lookup(userId);
+      expect(tinodeId, isNotNull);
+      expect(tinodeId, isNotEmpty);
+      expect(tinodeId!.startsWith('usr'), isTrue);
+
+      await module.disconnect();
+    });
+
+    test('reverse lookup returns app user ID via TAGS', () async {
+      final userId = uniqueUserId();
+      final module = TicTacModule(makeTagsConfig(userId));
+      await module.connect();
+
+      final tinodeId = await module.identityResolver.lookup(userId);
+      expect(tinodeId, isNotNull);
+
+      final resolvedAppId = await module.identityResolver.reverseLookup(tinodeId!);
+      expect(resolvedAppId, equals(userId));
+
+      await module.disconnect();
+    });
+
+    test('batch lookup maps multiple users', () async {
+      final userIdA = uniqueUserId();
+      final userIdB = uniqueUserId();
+      final moduleA = TicTacModule(makeTagsConfig(userIdA));
+      final moduleB = TicTacModule(makeTagsConfig(userIdB));
+      await moduleA.connect();
+      await moduleB.connect();
+
+      final tinodeIdA = await moduleA.identityResolver.lookup(userIdA);
+      final tinodeIdB = await moduleB.identityResolver.lookup(userIdB);
+      expect(tinodeIdA, isNotNull);
+      expect(tinodeIdB, isNotNull);
+
+      // Fresh resolver (no local cache) to test batch via TAGS
+      final resolver = TagsIdentityResolver(
+        tagsBaseUrl: tagsBaseUrl,
+        appId: appId,
+        appKey: appKey,
+      );
+
+      final mappings = await resolver.batchLookup([userIdA, userIdB]);
+      expect(mappings[userIdA], equals(tinodeIdA));
+      expect(mappings[userIdB], equals(tinodeIdB));
+
+      await moduleA.disconnect();
+      await moduleB.disconnect();
+    });
+
+    test('batch reverse lookup maps multiple tinode IDs', () async {
+      final userIdA = uniqueUserId();
+      final userIdB = uniqueUserId();
+      final moduleA = TicTacModule(makeTagsConfig(userIdA));
+      final moduleB = TicTacModule(makeTagsConfig(userIdB));
+      await moduleA.connect();
+      await moduleB.connect();
+
+      final tinodeIdA = await moduleA.identityResolver.lookup(userIdA);
+      final tinodeIdB = await moduleB.identityResolver.lookup(userIdB);
+
+      // Fresh resolver — no cache
+      final resolver = TagsIdentityResolver(
+        tagsBaseUrl: tagsBaseUrl,
+        appId: appId,
+        appKey: appKey,
+      );
+
+      final mappings = await resolver.batchReverseLookup([tinodeIdA!, tinodeIdB!]);
+      expect(mappings[tinodeIdA], equals(userIdA));
+      expect(mappings[tinodeIdB], equals(userIdB));
+
+      await moduleA.disconnect();
+      await moduleB.disconnect();
+    });
+
+    test('lookup unknown user returns null', () async {
+      final resolver = TagsIdentityResolver(
+        tagsBaseUrl: tagsBaseUrl,
+        appId: appId,
+        appKey: appKey,
+      );
+
+      final result = await resolver.lookup('nonexistent-user-${uniqueUserId()}');
+      expect(result, isNull);
+    });
+
+    test('connect and send message with TagsIdentityResolver', () async {
+      final userId = uniqueUserId();
+      final module = TicTacModule(makeTagsConfig(userId));
+      await module.connect();
+
+      final topic = await module.createGroupTopic('tags-lookup-test', []);
+      final controller = await module.joinTopic(topic.id);
+
+      await controller.sendMessage(
+        const types.PartialText(text: 'hello with tags resolver'),
+      );
+
+      await Future.delayed(Duration(seconds: 2));
+
+      final hasMessage = controller.messages.any((m) =>
+          m is types.TextMessage && m.text == 'hello with tags resolver');
+      expect(hasMessage, isTrue, reason: 'Message should work with TagsIdentityResolver');
+
+      await module.deleteTopic(topic.id, hard: true);
+      await module.disconnect();
     });
   });
 }

@@ -47,6 +47,11 @@ class TicTacConfig {
   /// Random jitter factor applied to reconnect delays (0.0 - 1.0)
   final double jitterFactor;
 
+  /// TAGS base URL for identity resolution (e.g. "https://dev-tags.playbonkers.com")
+  /// When set, enables TagsIdentityResolver for resolving app user IDs via TAILS.
+  /// When null, uses CachedIdentityResolver (local cache only).
+  final String? tagsBaseUrl;
+
   TicTacConfig({
     required this.tinodeHost,
     this.tinodePort = 6060,
@@ -64,6 +69,7 @@ class TicTacConfig {
     this.coverInterval = const Duration(seconds: 30),
     this.maxReconnectDuration = const Duration(minutes: 7),
     this.jitterFactor = 0.3,
+    this.tagsBaseUrl,
   });
 
   /// Constructs the websocket host:port string for the Tinode SDK

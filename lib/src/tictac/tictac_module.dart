@@ -10,6 +10,7 @@ import 'package:tictac/src/tictac/models/topic_type.dart';
 import 'package:tictac/src/tictac/models/message_preview.dart';
 import 'package:tictac/src/tictac/identity/identity_resolver.dart';
 import 'package:tictac/src/tictac/identity/cached_identity_resolver.dart';
+import 'package:tictac/src/tictac/identity/tags_identity_resolver.dart';
 import 'package:tictac/src/tictac/topic_controller.dart';
 
 /// Main entry point for TicTac chat functionality.
@@ -63,7 +64,17 @@ class TicTacModule {
     this.onMessageReceived,
     IdentityResolver? identityResolver,
   }) {
-    this.identityResolver = identityResolver ?? CachedIdentityResolver();
+    if (identityResolver != null) {
+      this.identityResolver = identityResolver;
+    } else if (config.tagsBaseUrl != null && config.tagsBaseUrl!.isNotEmpty) {
+      this.identityResolver = TagsIdentityResolver(
+        tagsBaseUrl: config.tagsBaseUrl!,
+        appId: config.appId,
+        appKey: config.appKey,
+      );
+    } else {
+      this.identityResolver = CachedIdentityResolver();
+    }
   }
 
   /// Check if a user is online.
@@ -263,7 +274,7 @@ class TicTacModule {
     // Resolve app user IDs to tinode user IDs for invites
     final tinodeUserIds = <String>[];
     for (final appUserId in memberAppUserIds) {
-      final tinodeId = await identityResolver.resolve(appUserId);
+      final tinodeId = await identityResolver.lookup(appUserId);
       if (tinodeId != null) {
         tinodeUserIds.add(tinodeId);
       }
@@ -303,7 +314,7 @@ class TicTacModule {
   Future<tictac_models.Topic> createDirectTopic(String otherAppUserId) async {
     if (_tinode == null) throw StateError('Not connected');
 
-    final otherTinodeId = await identityResolver.resolve(otherAppUserId);
+    final otherTinodeId = await identityResolver.lookup(otherAppUserId);
     if (otherTinodeId == null) {
       throw Exception('Cannot resolve user ID: $otherAppUserId');
     }

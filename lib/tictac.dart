@@ -19,6 +19,8 @@ export 'src/tictac/models/message_preview.dart' show MessagePreview;
 export 'src/tictac/identity/identity_resolver.dart' show IdentityResolver;
 export 'src/tictac/identity/cached_identity_resolver.dart'
     show CachedIdentityResolver;
+export 'src/tictac/identity/tags_identity_resolver.dart'
+    show TagsIdentityResolver;
 
 // Widget layer
 export 'src/tictac/tictac_chat.dart' show TicTacChat;

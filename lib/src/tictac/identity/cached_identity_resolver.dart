@@ -1,13 +1,10 @@
 import 'identity_resolver.dart';
 
-/// Phase 1 identity resolver that uses an in-memory bidirectional cache.
+/// Identity resolver that uses an in-memory bidirectional cache.
 ///
 /// Seeded from:
 /// - Login response (current user's app_user_id <-> tinode_user_id)
 /// - Topic membership metadata (if public.appUserId is set)
-///
-/// For phase 2, this will be replaced or wrapped by [TagsIdentityResolver]
-/// which calls TAILS via TAGS ALB for lookups not in cache.
 class CachedIdentityResolver implements IdentityResolver {
   /// app_user_id -> tinode_user_id
   final Map<String, String> _forward = {};
@@ -22,7 +19,7 @@ class CachedIdentityResolver implements IdentityResolver {
   }
 
   @override
-  Future<String?> resolve(String appUserId) async {
+  Future<String?> lookup(String appUserId) async {
     return _forward[appUserId];
   }
 
@@ -32,7 +29,7 @@ class CachedIdentityResolver implements IdentityResolver {
   }
 
   @override
-  Future<Map<String, String>> batchResolve(List<String> appUserIds) async {
+  Future<Map<String, String>> batchLookup(List<String> appUserIds) async {
     final result = <String, String>{};
     for (final id in appUserIds) {
       final tinodeId = _forward[id];
