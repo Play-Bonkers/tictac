@@ -326,14 +326,94 @@ void main() {
   });
 
   // -------------------------------------------------------------------------
-  // NOTE: Two-user messaging and delete message tests are blocked by
-  // Tinode SDK bug: Topic.publishMessage rejects with "Cannot publish on
-  // inactive topic" when the topic object's _subscribed flag is lost between
-  // subscribe and publish calls. This affects:
-  // - P2P topics from the non-creator side
-  // - Topics where there's a timing gap between join and send
-  // These will be re-enabled after the SDK topic lifecycle is fixed.
+  // Two-user messaging
   // -------------------------------------------------------------------------
+
+  group('Two-user messaging', () {
+    test('user A sends message, user B receives it via P2P', () async {
+      final userIdA = uniqueUserId();
+      final userIdB = uniqueUserId();
+      final moduleA = TicTacModule(makeConfig(userIdA));
+      final moduleB = TicTacModule(makeConfig(userIdB));
+      await moduleA.connect();
+      await moduleB.connect();
+
+      // Seed identity resolvers
+      moduleA.identityResolver.addMapping(
+        userIdB,
+        (await moduleB.identityResolver.resolve(userIdB)) ?? '',
+      );
+      moduleB.identityResolver.addMapping(
+        userIdA,
+        (await moduleA.identityResolver.resolve(userIdA)) ?? '',
+      );
+
+      final bTinodeId = await moduleA.identityResolver.resolve(userIdB);
+      if (bTinodeId == null || bTinodeId.isEmpty) {
+        await moduleA.disconnect();
+        await moduleB.disconnect();
+        return;
+      }
+
+      // A creates P2P with B, B creates P2P with A (Tinode reuses the channel)
+      final topicA = await moduleA.createDirectTopic(userIdB);
+      final controllerA = await moduleA.joinTopic(topicA.id);
+
+      final topicB = await moduleB.createDirectTopic(userIdA);
+      final controllerB = await moduleB.joinTopic(topicB.id);
+
+      // A sends a message
+      await controllerA.sendMessage(
+        const types.PartialText(text: 'hello from A'),
+      );
+
+      await Future.delayed(Duration(seconds: 3));
+
+      final bReceived = controllerB.messages.any((m) =>
+          m is types.TextMessage && m.text == 'hello from A');
+      expect(bReceived, isTrue, reason: 'B should receive message from A');
+
+      await moduleA.deleteTopic(topicA.id, hard: true);
+      await moduleA.disconnect();
+      await moduleB.disconnect();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Delete message
+  // -------------------------------------------------------------------------
+
+  group('Delete message', () {
+    test('delete message removes it from controller', () async {
+      final userId = uniqueUserId();
+      final module = TicTacModule(makeConfig(userId));
+      await module.connect();
+
+      final topic = await module.createGroupTopic('delmsg-test', []);
+      final controller = await module.joinTopic(topic.id);
+
+      await controller.sendMessage(
+        const types.PartialText(text: 'to be deleted'),
+      );
+
+      await Future.delayed(Duration(seconds: 2));
+
+      final confirmed = controller.messages.where((m) =>
+          m is types.TextMessage &&
+          (m as types.TextMessage).text == 'to be deleted').toList();
+      expect(confirmed, isNotEmpty, reason: 'Should have confirmed message');
+
+      final msgId = confirmed.first.id;
+      await controller.deleteMessage(msgId);
+      await Future.delayed(Duration(seconds: 2));
+
+      final stillExists = controller.messages.any((m) => m.id == msgId);
+      expect(stillExists, isFalse, reason: 'Deleted message should be removed');
+
+      await module.deleteTopic(topic.id, hard: true);
+      await module.disconnect();
+    });
+  });
 
   // -------------------------------------------------------------------------
   // Presence

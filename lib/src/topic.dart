@@ -210,9 +210,16 @@ class Topic {
       _new = false;
 
       // Name may change new123456 -> grpAbCdEf
+      var oldName = name;
       name = ctrl.topic!;
       created = ctrl.ts!;
       updated = ctrl.ts!;
+
+      // Re-cache under the server-assigned name so message routing finds this topic
+      if (oldName != null && oldName != name) {
+        _cacheManager.delete('topic', oldName);
+      }
+      _cacheManager.put('topic', name!, this);
       // Don't assign touched, otherwise topic will be put on top of the list on subscribe.
 
       if (name != topic_names.TOPIC_ME && name != topic_names.TOPIC_FND) {
@@ -438,9 +445,11 @@ class Topic {
     }
 
     var response = await result;
-    var ctrl = CtrlMessage.fromMessage(response);
+    var ctrl = response is CtrlMessage
+        ? response
+        : CtrlMessage.fromMessage(response as Map<String, dynamic>);
 
-    if (ctrl.params['del'] > _maxDel) {
+    if (ctrl.params != null && ctrl.params['del'] != null && ctrl.params['del'] > _maxDel) {
       _maxDel = ctrl.params['del'];
     }
 
@@ -499,7 +508,8 @@ class Topic {
     var ctrl = await _tinodeService.deleteTopic(name ?? '', hard);
     resetSubscription();
     _gone();
-    return CtrlMessage.fromMessage(ctrl);
+    if (ctrl is CtrlMessage) return ctrl;
+    return CtrlMessage.fromMessage(ctrl as Map<String, dynamic>);
   }
 
   /// Delete subscription. Requires Share permission. Wrapper for Tinode.deleteSubscription
@@ -1092,7 +1102,7 @@ class Topic {
     // Check for missing messages at the end.
     // All messages could be missing or it could be a new topic with no messages.
     var last = _messages.length > 0 ? _messages.getLast() : null;
-    var maxSeq = max(seq!, _maxSeq);
+    var maxSeq = max(seq ?? 0, _maxSeq);
     if ((maxSeq > 0 && last == null) || (last != null && (((last.hi != null && last.hi! > 0) ? last.hi : last.seq)! < maxSeq))) {
       if (last != null && (last.hi != null && last.hi! > 0)) {
         // Extend existing gap

@@ -149,6 +149,16 @@ class TopicSubscription {
     );
   }
 
+  Map<String, dynamic> toJson() {
+    final map = <String, dynamic>{};
+    if (user != null) map['user'] = user;
+    if (mode != null) map['mode'] = mode;
+    if (acs != null) map['acs'] = acs!.jsonHelper();
+    if (public != null) map['public'] = public;
+    if (private != null) map['private'] = private;
+    return map;
+  }
+
   TopicDescription asDesc() {
     return TopicDescription(
       acs: acs,

@@ -35,13 +35,13 @@ const int AccessModePermissionsBITMASK = JOIN | READ | WRITE | PRES | APPROVE | 
 /// limited to managing presence notifications and banning uses from initiating or continuing P2P conversations.
 class AccessMode {
   /// Permissions granted to user by topic's manager
-  late int _given;
+  int _given = NONE;
 
   /// User's desired permissions
-  late int _want;
+  int _want = NONE;
 
   /// Combination of want and given
-  late int mode;
+  int mode = NONE;
 
   int operator [](other) {
     switch (other) {
