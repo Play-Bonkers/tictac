@@ -111,16 +111,23 @@ class TicTacModule {
     _connectionState.add(TicTacConnectionState.connecting);
 
     try {
+      // Build upgrade headers with app credentials and optional auth token
+      final upgradeHeaders = <String, String>{
+        'x-app-id': config.appId,
+        'x-app-key': config.appKey,
+      };
+      final token = await config.authTokenProvider();
+      if (token != null && token.isNotEmpty) {
+        upgradeHeaders['authorization'] = 'Bearer $token';
+      }
+
       _tinode = tinode.Tinode(
         'TicTac/1.0',
         tinode.ConnectionOptions(
           config.wsHostPort,
           config.apiKey,
           secure: config.secure,
-          headers: {
-            'x-app-id': config.appId,
-            'x-app-key': config.appKey,
-          },
+          headers: upgradeHeaders,
         ),
         false,
       );

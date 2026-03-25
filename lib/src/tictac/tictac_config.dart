@@ -61,6 +61,11 @@ class TicTacConfig {
   /// When null, uses CachedIdentityResolver (local cache only).
   final String? tagsBaseUrl;
 
+  /// Callback that returns the current auth token (e.g. Cognito JWT).
+  /// Called on every connect/reconnect to get a fresh token for the websocket
+  /// upgrade Authorization header.
+  final Future<String?> Function() authTokenProvider;
+
   TicTacConfig({
     required this.tinodeHost,
     this.tinodePort = 6060,
@@ -82,6 +87,7 @@ class TicTacConfig {
     this.pongTimeout = const Duration(seconds: 5),
     this.backgroundReconnectThreshold = const Duration(seconds: 30),
     this.tagsBaseUrl,
+    required this.authTokenProvider,
   });
 
   /// Constructs the websocket host:port string for the Tinode SDK

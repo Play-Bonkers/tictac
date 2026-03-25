@@ -29,6 +29,7 @@ void main() {
       heartbeatInterval: heartbeatInterval,
       pongTimeout: pongTimeout,
       backgroundReconnectThreshold: const Duration(seconds: 2),
+      authTokenProvider: () async => null,
     );
   }
 

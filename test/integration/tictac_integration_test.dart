@@ -27,6 +27,7 @@ void main() {
       appKey: appKey,
       sessionId: 'test-session',
       generateRequestId: () => 'req-${DateTime.now().millisecondsSinceEpoch}',
+      authTokenProvider: () async => null, // Direct Tinode connection, no JWT needed
     );
   }
 
@@ -539,6 +540,7 @@ void main() {
         sessionId: 'test-session',
         generateRequestId: () => 'req-${DateTime.now().millisecondsSinceEpoch}',
         tagsBaseUrl: tagsBaseUrl,
+        authTokenProvider: () async => null,
       );
     }
 
