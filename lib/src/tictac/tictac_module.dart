@@ -117,6 +117,10 @@ class TicTacModule {
           config.wsHostPort,
           config.apiKey,
           secure: config.secure,
+          headers: {
+            'x-app-id': config.appId,
+            'x-app-key': config.appKey,
+          },
         ),
         false,
       );
