@@ -76,11 +76,27 @@ class TopicController extends ChangeNotifier {
   StreamSubscription? _infoSub;
   StreamSubscription? _metaSubSub;
 
+  /// Return a fallback app user ID for message author, or null to drop the message.
+  final String? Function(String tinodeUserId, String topicId)? onUnresolvedMessageAuthor;
+
+  /// Return a fallback app user ID for a member, or null to skip.
+  final String? Function(String tinodeUserId, String topicId)? onUnresolvedMember;
+
+  /// Return a fallback app user ID for a presence update, or null to skip.
+  final String? Function(String tinodeUserId, bool isOnline)? onUnresolvedPresence;
+
+  /// Return a fallback app user ID for a typing indicator, or null to skip.
+  final String? Function(String tinodeUserId, String topicId)? onUnresolvedTyping;
+
   TopicController({
     required this.topicId,
     required this.userId,
     required this.identityResolver,
     this.userResolver,
+    this.onUnresolvedMessageAuthor,
+    this.onUnresolvedMember,
+    this.onUnresolvedPresence,
+    this.onUnresolvedTyping,
   }) {
     _user = _resolveUser(userId);
   }
@@ -301,7 +317,11 @@ class TopicController extends ChangeNotifier {
   void _handleData(tinode.DataMessage? data) {
     if (data == null) return;
 
-    _resolveAuthor(data.from).then((appUserId) {
+    _resolveAuthor(data.from).then((resolvedId) {
+      final appUserId = resolvedId ??
+          onUnresolvedMessageAuthor?.call(data.from ?? '', topicId);
+      if (appUserId == null) return;
+
       final author = _resolveUser(appUserId);
       final msgId = data.seq?.toString() ?? _uuid.v4();
       final isOwnMessage = appUserId == userId;
@@ -394,9 +414,11 @@ class TopicController extends ChangeNotifier {
       final tinodeUserId = pres.src;
       if (tinodeUserId == null) return;
 
-      identityResolver.reverseLookup(tinodeUserId).then((appUserId) {
-        final uid = appUserId ?? tinodeUserId;
-        _presenceMap[uid] = pres.what == 'on';
+      identityResolver.reverseLookup(tinodeUserId).then((resolvedId) {
+        final appUserId = resolvedId ??
+            onUnresolvedPresence?.call(tinodeUserId, pres.what == 'on');
+        if (appUserId == null) return;
+        _presenceMap[appUserId] = pres.what == 'on';
         notifyListeners();
       }).catchError((e) {
         debugPrint('TicTac: _handlePres reverseLookup error: $e');
@@ -413,10 +435,11 @@ class TopicController extends ChangeNotifier {
       if (from == null) return;
 
       // Resolve tinode user ID to app user ID
-      identityResolver.reverseLookup(from).then((appUserId) {
-        final uid = appUserId ?? from;
-        if (uid == userId) return;
-        _setTyping(uid);
+      identityResolver.reverseLookup(from).then((resolvedId) {
+        final appUserId = resolvedId ??
+            onUnresolvedTyping?.call(from, topicId);
+        if (appUserId == null || appUserId == userId) return;
+        _setTyping(appUserId);
       }).catchError((e) {
         debugPrint('TicTac: _handleInfo reverseLookup error: $e');
       });
@@ -436,9 +459,10 @@ class TopicController extends ChangeNotifier {
       identityResolver.addMapping(appUserId, sub.user!);
     }
 
-    final uid = appUserId ?? sub.user!;
-    _memberMap[uid] = _resolveUser(uid);
-    _presenceMap[uid] = sub.online ?? false;
+    appUserId ??= onUnresolvedMember?.call(sub.user!, topicId);
+    if (appUserId == null) return;
+    _memberMap[appUserId] = _resolveUser(appUserId);
+    _presenceMap[appUserId] = sub.online ?? false;
   }
 
   // ---------------------------------------------------------------------------
@@ -499,10 +523,9 @@ class TopicController extends ChangeNotifier {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  Future<String> _resolveAuthor(String? tinodeUserId) async {
-    if (tinodeUserId == null) return 'unknown';
-    final appUserId = await identityResolver.reverseLookup(tinodeUserId);
-    return appUserId ?? tinodeUserId;
+  Future<String?> _resolveAuthor(String? tinodeUserId) async {
+    if (tinodeUserId == null) return null;
+    return await identityResolver.reverseLookup(tinodeUserId);
   }
 
   void _insertInOrder(types.Message msg) {

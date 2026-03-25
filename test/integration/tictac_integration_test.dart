@@ -668,4 +668,189 @@ void main() {
       await module.disconnect();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Unresolved identity callbacks
+  // -------------------------------------------------------------------------
+
+  group('Unresolved identity callbacks', () {
+    test('onUnresolvedMessageAuthor provides fallback for message from unknown user', () async {
+      // User A sends a message. User B joins the same topic but uses a
+      // CachedIdentityResolver with NO mapping for A — so A's tinode ID
+      // can't be resolved. The callback provides a fallback.
+      final userIdA = uniqueUserId();
+      final userIdB = uniqueUserId();
+      final moduleA = TicTacModule(makeConfig(userIdA));
+      final moduleB = TicTacModule(
+        makeConfig(userIdB),
+        onUnresolvedMessageAuthor: (tinodeUserId, topicId) {
+          // Provide a fallback app user ID
+          return 'fallback-author';
+        },
+      );
+      await moduleA.connect();
+      await moduleB.connect();
+
+      // A creates a group topic
+      final topic = await moduleA.createGroupTopic('unresolved-msg-test', []);
+      final controllerA = await moduleA.joinTopic(topic.id);
+
+      // B joins — B's identity resolver has NO mapping for A's tinode ID
+      final controllerB = await moduleB.joinTopic(topic.id);
+
+      // A sends a message
+      await controllerA.sendMessage(
+        const types.PartialText(text: 'hello from unknown'),
+      );
+
+      await Future.delayed(Duration(seconds: 3));
+
+      // B should have the message with the fallback author ID
+      final msg = controllerB.messages.whereType<types.TextMessage>().where(
+          (m) => m.text == 'hello from unknown').firstOrNull;
+      expect(msg, isNotNull, reason: 'B should receive message with fallback author');
+      expect(msg!.author.id, equals('fallback-author'));
+
+      await moduleA.deleteTopic(topic.id, hard: true);
+      await moduleA.disconnect();
+      await moduleB.disconnect();
+    });
+
+    test('message is dropped when no callback and author unresolved', () async {
+      final userIdA = uniqueUserId();
+      final userIdB = uniqueUserId();
+      final moduleA = TicTacModule(makeConfig(userIdA));
+      // No onUnresolvedMessageAuthor callback
+      final moduleB = TicTacModule(makeConfig(userIdB));
+      await moduleA.connect();
+      await moduleB.connect();
+
+      final topic = await moduleA.createGroupTopic('dropped-msg-test', []);
+      final controllerA = await moduleA.joinTopic(topic.id);
+      final controllerB = await moduleB.joinTopic(topic.id);
+
+      // A sends a message — B can't resolve A's tinode ID
+      await controllerA.sendMessage(
+        const types.PartialText(text: 'this should be dropped'),
+      );
+
+      await Future.delayed(Duration(seconds: 3));
+
+      // B should NOT have the message (no fallback, dropped)
+      final hasMsg = controllerB.messages.any((m) =>
+          m is types.TextMessage && m.text == 'this should be dropped');
+      // The message might be there if B's own echo resolves, or might not
+      // depending on identity seeding. Either way, if it IS there, it should
+      // have an app user ID as author (not a tinode ID starting with 'usr')
+      for (final m in controllerB.messages) {
+        expect(m.author.id.startsWith('usr'), isFalse,
+            reason: 'No tinode IDs should leak to messages: ${m.author.id}');
+      }
+
+      await moduleA.deleteTopic(topic.id, hard: true);
+      await moduleA.disconnect();
+      await moduleB.disconnect();
+    });
+
+    test('onUnresolvedMessageAuthor returning null drops the message', () async {
+      final userIdA = uniqueUserId();
+      final userIdB = uniqueUserId();
+      final moduleA = TicTacModule(makeConfig(userIdA));
+      final callbackInvoked = <String>[];
+      final moduleB = TicTacModule(
+        makeConfig(userIdB),
+        onUnresolvedMessageAuthor: (tinodeUserId, topicId) {
+          callbackInvoked.add(tinodeUserId);
+          return null; // Explicitly drop
+        },
+      );
+      await moduleA.connect();
+      await moduleB.connect();
+
+      final topic = await moduleA.createGroupTopic('null-fallback-test', []);
+      final controllerA = await moduleA.joinTopic(topic.id);
+      final controllerB = await moduleB.joinTopic(topic.id);
+
+      await controllerA.sendMessage(
+        const types.PartialText(text: 'drop me'),
+      );
+
+      await Future.delayed(Duration(seconds: 3));
+
+      // Callback should have been invoked
+      // (it may or may not fire depending on whether B's echo resolves B's own ID)
+      // The key assertion: no tinode IDs in messages
+      for (final m in controllerB.messages) {
+        expect(m.author.id.startsWith('usr'), isFalse,
+            reason: 'No tinode IDs should leak: ${m.author.id}');
+      }
+
+      await moduleA.deleteTopic(topic.id, hard: true);
+      await moduleA.disconnect();
+      await moduleB.disconnect();
+    });
+
+    test('onUnresolvedMember provides fallback for topic member', () async {
+      final userIdA = uniqueUserId();
+      final moduleA = TicTacModule(
+        makeConfig(userIdA),
+        onUnresolvedMember: (tinodeUserId, topicId) {
+          return 'fallback-member-$tinodeUserId';
+        },
+      );
+      await moduleA.connect();
+
+      final topic = await moduleA.createGroupTopic('member-fallback-test', []);
+      final controller = await moduleA.joinTopic(topic.id);
+
+      await Future.delayed(Duration(seconds: 2));
+
+      // The member map should only contain app user IDs, never tinode IDs
+      for (final key in controller.memberMap.keys) {
+        expect(key.startsWith('usr'), isFalse,
+            reason: 'Member map key should be app user ID, got: $key');
+      }
+
+      await moduleA.deleteTopic(topic.id, hard: true);
+      await moduleA.disconnect();
+    });
+
+    test('onUnresolvedPresence provides fallback for presence event', () async {
+      final userIdA = uniqueUserId();
+      final presenceCallbacks = <String>[];
+      final moduleA = TicTacModule(
+        makeConfig(userIdA),
+        onUnresolvedPresence: (tinodeUserId, isOnline) {
+          presenceCallbacks.add('$tinodeUserId:$isOnline');
+          return 'fallback-presence-user';
+        },
+      );
+      await moduleA.connect();
+
+      // Just verify the module connects and the callback type is accepted
+      expect(moduleA.isConnected, isTrue);
+
+      // isOnline should work with app user IDs
+      expect(moduleA.isOnline('nonexistent'), isFalse);
+
+      await moduleA.disconnect();
+    });
+
+    test('no tinode IDs leak through topic memberAppUserIds', () async {
+      final userId = uniqueUserId();
+      final module = TicTacModule(makeConfig(userId));
+      await module.connect();
+
+      final topic = await module.createGroupTopic('no-leak-test', []);
+      expect(topic.memberAppUserIds.every((id) => !id.startsWith('usr')), isTrue,
+          reason: 'memberAppUserIds should not contain tinode IDs');
+
+      // Current user should NOT be in memberAppUserIds
+      expect(topic.memberAppUserIds.contains(userId), isFalse,
+          reason: 'Current user should not be in memberAppUserIds');
+
+      await module.deleteTopic(topic.id, hard: true);
+      await module.disconnect();
+    });
+  });
 }

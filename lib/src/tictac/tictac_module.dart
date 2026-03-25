@@ -34,6 +34,10 @@ class TicTacModule {
   void Function(tictac_models.Topic topic)? onTopicUpdated;
   void Function(String userId, bool isOnline)? onPresenceChanged;
   void Function(String topicId)? onMessageReceived;
+  String? Function(String tinodeUserId, String topicId)? onUnresolvedMessageAuthor;
+  String? Function(String tinodeUserId, String topicId)? onUnresolvedMember;
+  String? Function(String tinodeUserId, bool isOnline)? onUnresolvedPresence;
+  String? Function(String tinodeUserId, String topicId)? onUnresolvedTyping;
 
   // ---------------------------------------------------------------------------
   // Internal state
@@ -80,6 +84,10 @@ class TicTacModule {
     this.onTopicUpdated,
     this.onPresenceChanged,
     this.onMessageReceived,
+    this.onUnresolvedMessageAuthor,
+    this.onUnresolvedMember,
+    this.onUnresolvedPresence,
+    this.onUnresolvedTyping,
     IdentityResolver? identityResolver,
   }) {
     if (identityResolver != null) {
@@ -505,7 +513,7 @@ class TicTacModule {
       id: topicId,
       name: name,
       type: TopicType.group,
-      memberAppUserIds: [config.appUserId, ...memberAppUserIds],
+      memberAppUserIds: memberAppUserIds,
     );
   }
 
@@ -531,7 +539,7 @@ class TicTacModule {
       id: topicId,
       name: otherAppUserId,
       type: TopicType.direct,
-      memberAppUserIds: [config.appUserId, otherAppUserId],
+      memberAppUserIds: [otherAppUserId],
     );
   }
 
@@ -566,6 +574,10 @@ class TicTacModule {
       topicId: topicId,
       userId: config.appUserId,
       identityResolver: identityResolver,
+      onUnresolvedMessageAuthor: onUnresolvedMessageAuthor,
+      onUnresolvedMember: onUnresolvedMember,
+      onUnresolvedPresence: onUnresolvedPresence,
+      onUnresolvedTyping: onUnresolvedTyping,
     );
     controller.attachToTopic(topic);
     _topicControllers[topicId] = controller;
@@ -674,10 +686,12 @@ class TicTacModule {
       final tinodeUserId = pres.src!;
 
       // Reverse lookup to app user ID
-      identityResolver.reverseLookup(tinodeUserId).then((appUserId) {
-        final userId = appUserId ?? tinodeUserId;
-        _presenceMap[userId] = isOnline;
-        onPresenceChanged?.call(userId, isOnline);
+      identityResolver.reverseLookup(tinodeUserId).then((resolvedId) {
+        final appUserId = resolvedId ??
+            onUnresolvedPresence?.call(tinodeUserId, isOnline);
+        if (appUserId == null) return;
+        _presenceMap[appUserId] = isOnline;
+        onPresenceChanged?.call(appUserId, isOnline);
       }).catchError((e) {
         _log('Presence reverseLookup error: $e');
       });
@@ -748,17 +762,13 @@ class TicTacModule {
       MessagePreview? lastMessage;
       // seq indicates messages exist but we don't have content from the sub
 
-      // Resolve member IDs for P2P
+      // Resolve other member IDs (excludes current user)
       final memberIds = <String>[];
-      memberIds.add(config.appUserId);
       if (isP2P) {
         final otherAppUserId = await identityResolver.reverseLookup(topicName);
         if (otherAppUserId != null) {
           memberIds.add(otherAppUserId);
           displayName ??= otherAppUserId;
-        } else {
-          memberIds.add(topicName);
-          displayName ??= topicName;
         }
       }
 
