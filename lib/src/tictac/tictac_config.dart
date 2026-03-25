@@ -47,6 +47,15 @@ class TicTacConfig {
   /// Random jitter factor applied to reconnect delays (0.0 - 1.0)
   final double jitterFactor;
 
+  /// Heartbeat interval for detecting dead connections (default: 12s)
+  final Duration heartbeatInterval;
+
+  /// Timeout waiting for pong response before declaring connection dead (default: 5s)
+  final Duration pongTimeout;
+
+  /// How long the app can be backgrounded before forcing a reconnect (default: 30s)
+  final Duration backgroundReconnectThreshold;
+
   /// TAGS base URL for identity resolution (e.g. "https://dev-tags.playbonkers.com")
   /// When set, enables TagsIdentityResolver for resolving app user IDs via TAILS.
   /// When null, uses CachedIdentityResolver (local cache only).
@@ -69,6 +78,9 @@ class TicTacConfig {
     this.coverInterval = const Duration(seconds: 30),
     this.maxReconnectDuration = const Duration(minutes: 7),
     this.jitterFactor = 0.3,
+    this.heartbeatInterval = const Duration(seconds: 12),
+    this.pongTimeout = const Duration(seconds: 5),
+    this.backgroundReconnectThreshold = const Duration(seconds: 30),
     this.tagsBaseUrl,
   });
 

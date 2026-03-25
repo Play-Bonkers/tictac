@@ -2,9 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:flutter/widgets.dart' show AppLifecycleState;
+import 'package:rxdart/rxdart.dart';
 import 'package:tictac/tinode.dart' as tinode;
 import 'package:tictac/src/models/rest-auth-secret.dart';
 import 'package:tictac/src/tictac/tictac_config.dart';
+import 'package:tictac/src/tictac/connection_state.dart';
 import 'package:tictac/src/tictac/models/topic.dart' as tictac_models;
 import 'package:tictac/src/tictac/models/topic_type.dart';
 import 'package:tictac/src/tictac/models/message_preview.dart';
@@ -49,6 +52,21 @@ class TicTacModule {
   final Map<String, String> _topicNames = {}; // topicId -> display name
   late IdentityResolver identityResolver;
 
+  // Connection state
+  final BehaviorSubject<TicTacConnectionState> _connectionState =
+      BehaviorSubject.seeded(TicTacConnectionState.disconnected);
+  Stream<TicTacConnectionState> get connectionState => _connectionState.stream;
+  TicTacConnectionState get currentConnectionState => _connectionState.value;
+
+  // Heartbeat
+  Timer? _heartbeatTimer;
+  Timer? _pongTimer;
+  bool _awaitingPong = false;
+  StreamSubscription? _onNetworkProbeSub;
+
+  // App lifecycle
+  DateTime? _backgroundedAt;
+
   StreamSubscription? _onDisconnectSub;
   StreamSubscription? _onPressSub;
   StreamSubscription? _onSubsUpdatedSub;
@@ -90,6 +108,7 @@ class TicTacModule {
   /// Connect to Tinode, authenticate, and return the user's topic list.
   Future<List<tictac_models.Topic>> connect() async {
     _intentionalDisconnect = false;
+    _connectionState.add(TicTacConnectionState.connecting);
 
     try {
       _tinode = tinode.Tinode(
@@ -161,10 +180,14 @@ class TicTacModule {
       _isReconnecting = false;
       _firstFailureTime = null;
 
+      _connectionState.add(TicTacConnectionState.connected);
+      _startHeartbeat();
+
       onConnected?.call(topics);
       return topics;
     } catch (e) {
       _log('Connection failed: $e');
+      _connectionState.add(TicTacConnectionState.disconnected);
       onDisconnected?.call('Connection failed: $e');
       _scheduleReconnect();
       rethrow;
@@ -174,13 +197,16 @@ class TicTacModule {
   /// Disconnect from Tinode.
   Future<void> disconnect() async {
     _intentionalDisconnect = true;
+    _stopHeartbeat();
     _onDisconnectSub?.cancel();
     _onPressSub?.cancel();
     _onSubsUpdatedSub?.cancel();
+    _onNetworkProbeSub?.cancel();
     _tinode?.disconnect();
     _tinode = null;
     _presenceMap.clear();
     _topicNames.clear();
+    _connectionState.add(TicTacConnectionState.disconnected);
   }
 
   /// Force a reconnection (resets backoff state).
@@ -193,6 +219,168 @@ class TicTacModule {
 
   void dispose() {
     disconnect();
+    _connectionState.close();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Heartbeat
+  // ---------------------------------------------------------------------------
+
+  void _startHeartbeat() {
+    _stopHeartbeat();
+    _awaitingPong = false;
+
+    // Subscribe to pong responses
+    _onNetworkProbeSub?.cancel();
+    _onNetworkProbeSub = _tinode?.onNetworkProbe.listen((_) {
+      _awaitingPong = false;
+      _pongTimer?.cancel();
+    });
+
+    _heartbeatTimer = Timer.periodic(config.heartbeatInterval, (_) {
+      _sendHeartbeat();
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _pongTimer?.cancel();
+    _pongTimer = null;
+    _awaitingPong = false;
+  }
+
+  void _sendHeartbeat() {
+    if (_tinode == null || !_tinode!.isConnected) {
+      _declareDead('Socket not connected');
+      return;
+    }
+
+    if (_awaitingPong) {
+      _declareDead('Previous pong never arrived');
+      return;
+    }
+
+    try {
+      _tinode!.networkProbe();
+      _awaitingPong = true;
+      _pongTimer = Timer(config.pongTimeout, () {
+        _declareDead('Pong timeout');
+      });
+    } catch (e) {
+      _declareDead('Probe send failed: $e');
+    }
+  }
+
+  void _declareDead(String reason) {
+    _stopHeartbeat();
+    _log('Heartbeat: $reason — declaring connection dead');
+    onDisconnected?.call('Heartbeat timeout');
+    _scheduleReconnect();
+  }
+
+  // ---------------------------------------------------------------------------
+  // App lifecycle
+  // ---------------------------------------------------------------------------
+
+  /// Call this from the consuming app when app lifecycle state changes.
+  /// Enables automatic reconnection after backgrounding.
+  void handleAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      _onAppBackgrounded();
+    } else if (state == AppLifecycleState.resumed) {
+      _onAppResumed();
+    }
+  }
+
+  void _onAppBackgrounded() {
+    _backgroundedAt = DateTime.now();
+    _stopHeartbeat();
+  }
+
+  void _onAppResumed() {
+    final wasBg = _backgroundedAt;
+    _backgroundedAt = null;
+
+    if (_intentionalDisconnect) return;
+
+    if (wasBg != null &&
+        DateTime.now().difference(wasBg) > config.backgroundReconnectThreshold) {
+      _log('Resumed after long background — forcing reconnect');
+      _smartReconnect();
+      return;
+    }
+
+    // Quick health check then resume heartbeat
+    if (_tinode == null || !_tinode!.isConnected) {
+      _log('Resumed but socket is dead — reconnecting');
+      _smartReconnect();
+    } else {
+      _startHeartbeat();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pre-operation health check
+  // ---------------------------------------------------------------------------
+
+  Future<void> _ensureConnected() async {
+    if (_tinode != null && _tinode!.isConnected) return;
+
+    final state = _connectionState.value;
+    if (state == TicTacConnectionState.connecting ||
+        state == TicTacConnectionState.reconnecting) {
+      _log('Waiting for connection to establish...');
+      await _connectionState.stream
+          .firstWhere((s) => s == TicTacConnectionState.connected)
+          .timeout(const Duration(seconds: 15));
+      return;
+    }
+
+    _log('Pre-operation health check failed — reconnecting');
+    final future = _connectionState.stream
+        .firstWhere((s) => s == TicTacConnectionState.connected)
+        .timeout(const Duration(seconds: 15));
+    _smartReconnect();
+    await future;
+  }
+
+  // ---------------------------------------------------------------------------
+  // TopicController re-attachment after reconnect
+  // ---------------------------------------------------------------------------
+
+  Future<void> _reattachTopicControllers() async {
+    final entries = Map.of(_topicControllers);
+    for (final entry in entries.entries) {
+      final topicId = entry.key;
+      final controller = entry.value;
+
+      try {
+        final topic = _tinode!.getTopic(topicId);
+
+        if (!topic.isSubscribed) {
+          tinode.MetaGetBuilder builder;
+          try {
+            builder = tinode.MetaGetBuilder(topic)
+                .withLaterData(config.recentMessages)
+                .withLaterSub(null);
+          } on Error {
+            builder = tinode.MetaGetBuilder(topic)
+                .withData(null, null, config.recentMessages)
+                .withSub(null, null, null);
+          }
+          await topic.subscribe(builder.build(), null);
+        }
+
+        controller.attachToTopic(topic);
+        controller.setConnected(true);
+        _log('Reattached topic $topicId');
+      } catch (e) {
+        _log('Failed to reattach topic $topicId: $e');
+        controller.setConnected(false);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -232,7 +420,7 @@ class TicTacModule {
   /// Get the current list of topics from the server.
   /// Always fetches fresh data — never reads from cache.
   Future<List<tictac_models.Topic>> getTopics() async {
-    if (_tinode == null) throw StateError('Not connected');
+    await _ensureConnected();
 
     final me = _tinode!.getMeTopic();
 
@@ -269,7 +457,7 @@ class TicTacModule {
     String name,
     List<String> memberAppUserIds,
   ) async {
-    if (_tinode == null) throw StateError('Not connected');
+    await _ensureConnected();
 
     // Resolve app user IDs to tinode user IDs for invites
     final tinodeUserIds = <String>[];
@@ -312,7 +500,7 @@ class TicTacModule {
 
   /// Create a direct (P2P) topic with another user.
   Future<tictac_models.Topic> createDirectTopic(String otherAppUserId) async {
-    if (_tinode == null) throw StateError('Not connected');
+    await _ensureConnected();
 
     final otherTinodeId = await identityResolver.lookup(otherAppUserId);
     if (otherTinodeId == null) {
@@ -338,7 +526,7 @@ class TicTacModule {
 
   /// Join a topic and return a TopicController for interacting with it.
   Future<TopicController> joinTopic(String topicId) async {
-    if (_tinode == null) throw StateError('Not connected');
+    await _ensureConnected();
 
     // Return existing controller if already joined
     if (_topicControllers.containsKey(topicId)) {
@@ -375,7 +563,7 @@ class TicTacModule {
 
   /// Delete a topic.
   Future<void> deleteTopic(String topicId, {bool hard = false}) async {
-    if (_tinode == null) throw StateError('Not connected');
+    await _ensureConnected();
     await _tinode!.deleteTopic(topicId, hard);
     final controller = _topicControllers.remove(topicId);
     controller?.dispose();
@@ -383,7 +571,7 @@ class TicTacModule {
 
   /// Leave a topic (detach without deleting).
   Future<void> leaveTopic(String topicId) async {
-    if (_tinode == null) throw StateError('Not connected');
+    await _ensureConnected();
     await _tinode!.leave(topicId, false);
     final controller = _topicControllers.remove(topicId);
     controller?.dispose();
@@ -395,16 +583,25 @@ class TicTacModule {
 
   Future<void> _smartReconnect() async {
     _intentionalDisconnect = false;
+    _stopHeartbeat();
+    _connectionState.add(TicTacConnectionState.reconnecting);
+
+    // Notify all controllers they're disconnected
+    for (final controller in _topicControllers.values) {
+      controller.setConnected(false);
+    }
 
     try {
       // Clean up old connection
       _onDisconnectSub?.cancel();
       _onPressSub?.cancel();
       _onSubsUpdatedSub?.cancel();
+      _onNetworkProbeSub?.cancel();
       _tinode?.disconnect();
       _tinode = null;
 
       await connect();
+      await _reattachTopicControllers();
     } catch (e) {
       _log('Reconnection failed: $e');
       // connect() already calls _scheduleReconnect on failure
@@ -420,6 +617,7 @@ class TicTacModule {
     final elapsed = DateTime.now().difference(_firstFailureTime!);
     if (elapsed >= config.maxReconnectDuration) {
       _log('Reconnect timeout — ${config.maxReconnectDuration.inMinutes}min elapsed');
+      _connectionState.add(TicTacConnectionState.failed);
       onDisconnected?.call(
         'Chat unavailable — could not reconnect after ${config.maxReconnectDuration.inMinutes} minutes',
       );
@@ -428,6 +626,7 @@ class TicTacModule {
 
     _isReconnecting = true;
     _reconnectAttempts++;
+    _connectionState.add(TicTacConnectionState.reconnecting);
 
     final int baseDelayMs;
     if (_reconnectAttempts <= config.aggressiveAttempts) {
@@ -468,6 +667,8 @@ class TicTacModule {
         final userId = appUserId ?? tinodeUserId;
         _presenceMap[userId] = isOnline;
         onPresenceChanged?.call(userId, isOnline);
+      }).catchError((e) {
+        _log('Presence reverseLookup error: $e');
       });
     }
   }

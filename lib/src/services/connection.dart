@@ -52,9 +52,11 @@ class ConnectionService {
     _loggerService.log('Connected.');
     _channel = IOWebSocketChannel(_ws!);
     onOpen.add('Opened');
-    _channel!.stream.listen((message) {
-      onMessage.add(message);
-    });
+    _channel!.stream.listen(
+      (message) { onMessage.add(message); },
+      onDone: () { onDisconnect.add(null); },
+      onError: (_) { onDisconnect.add(null); },
+    );
   }
 
   /// Send a message through websocket websocket connection

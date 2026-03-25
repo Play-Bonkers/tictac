@@ -7,6 +7,7 @@ library tictac;
 export 'src/tictac/tictac_module.dart' show TicTacModule;
 export 'src/tictac/tictac_config.dart' show TicTacConfig;
 export 'src/tictac/topic_controller.dart' show TopicController;
+export 'src/tictac/connection_state.dart' show TicTacConnectionState;
 
 // Models (tictac's own types — no Tinode leakage)
 export 'src/tictac/models/topic.dart' show Topic;

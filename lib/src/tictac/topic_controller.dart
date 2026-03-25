@@ -382,6 +382,8 @@ class TopicController extends ChangeNotifier {
       }
 
       notifyListeners();
+    }).catchError((e) {
+      debugPrint('TicTac: _handleData error: $e');
     });
   }
 
@@ -396,6 +398,8 @@ class TopicController extends ChangeNotifier {
         final uid = appUserId ?? tinodeUserId;
         _presenceMap[uid] = pres.what == 'on';
         notifyListeners();
+      }).catchError((e) {
+        debugPrint('TicTac: _handlePres reverseLookup error: $e');
       });
     }
   }
@@ -413,6 +417,8 @@ class TopicController extends ChangeNotifier {
         final uid = appUserId ?? from;
         if (uid == userId) return;
         _setTyping(uid);
+      }).catchError((e) {
+        debugPrint('TicTac: _handleInfo reverseLookup error: $e');
       });
     }
   }
