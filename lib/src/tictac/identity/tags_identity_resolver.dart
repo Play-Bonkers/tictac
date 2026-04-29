@@ -37,19 +37,37 @@ class TagsIdentityResolver implements IdentityResolver {
   @override
   Future<String?> lookup(String appUserId) async {
     final cached = await _cache.lookup(appUserId);
-    if (cached != null) return cached;
+    if (cached != null) {
+      print('TicTac: lookup($appUserId) -> $cached (cached)');
+      return cached;
+    }
 
     final result = await batchLookup([appUserId]);
-    return result[appUserId];
+    final tinodeId = result[appUserId];
+    print(
+      tinodeId == null
+          ? 'TicTac: lookup($appUserId) -> NOT_FOUND (TAGS returned no mapping for SERVICE_TINODE)'
+          : 'TicTac: lookup($appUserId) -> $tinodeId (via TAGS)',
+    );
+    return tinodeId;
   }
 
   @override
   Future<String?> reverseLookup(String tinodeUserId) async {
     final cached = await _cache.reverseLookup(tinodeUserId);
-    if (cached != null) return cached;
+    if (cached != null) {
+      print('TicTac: reverseLookup($tinodeUserId) -> $cached (cached)');
+      return cached;
+    }
 
     final result = await batchReverseLookup([tinodeUserId]);
-    return result[tinodeUserId];
+    final appUserId = result[tinodeUserId];
+    print(
+      appUserId == null
+          ? 'TicTac: reverseLookup($tinodeUserId) -> NOT_FOUND'
+          : 'TicTac: reverseLookup($tinodeUserId) -> $appUserId (via TAGS)',
+    );
+    return appUserId;
   }
 
   @override

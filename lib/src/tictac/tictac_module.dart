@@ -526,6 +526,10 @@ class TicTacModule {
       throw Exception('Cannot resolve user ID: $otherAppUserId');
     }
 
+    print(
+      'TicTac: createDirectTopic appUser=$otherAppUserId tinodeId=$otherTinodeId — subscribing',
+    );
+
     final p2pTopic = _tinode!.newTopicWith(otherTinodeId);
     await p2pTopic.subscribe(
       tinode.MetaGetBuilder(p2pTopic).build(),
