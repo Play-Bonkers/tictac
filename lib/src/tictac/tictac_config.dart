@@ -66,6 +66,14 @@ class TicTacConfig {
   /// upgrade Authorization header.
   final Future<String?> Function() authTokenProvider;
 
+  /// **Test-only.** When true, the encoded RestAuthSecret has its `provision`
+  /// flag set, allowing the auth Lambda to mint a new Tinode account if no
+  /// mapping exists. Production clients must leave this false — only the
+  /// server-side provisioner Lambda is allowed to flip it. Integration tests
+  /// stand in for the provisioner when they generate fresh app-user-ids, so
+  /// they can opt in here.
+  final bool provision;
+
   TicTacConfig({
     required this.tinodeHost,
     this.tinodePort = 6060,
@@ -88,6 +96,7 @@ class TicTacConfig {
     this.backgroundReconnectThreshold = const Duration(seconds: 30),
     this.tagsBaseUrl,
     required this.authTokenProvider,
+    this.provision = false,
   });
 
   /// Constructs the websocket host:port string for the Tinode SDK

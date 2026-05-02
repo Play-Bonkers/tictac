@@ -109,6 +109,19 @@ class TicTacModule {
   /// Whether we're currently connected and authenticated.
   bool get isConnected => _tinode?.isConnected ?? false;
 
+  /// Returns a copy of the current user's `me.public` map, or null if not
+  /// connected. The auth-lambda provisioner writes `appUserId` into this
+  /// during account creation; integration tests inspect it to verify the
+  /// provisioner's behavior end-to-end.
+  Map<String, dynamic>? getSelfPublic() {
+    final me = _tinode?.getMeTopic();
+    final pub = me?.public;
+    if (pub is Map) {
+      return Map<String, dynamic>.from(pub);
+    }
+    return null;
+  }
+
   // ---------------------------------------------------------------------------
   // Connection lifecycle
   // ---------------------------------------------------------------------------
@@ -178,8 +191,12 @@ class TicTacModule {
         subsSub.cancel();
       });
 
+      // withDesc fetches the user's own me.public/private from the server
+      // (display name, avatar, the appUserId set by the auth-lambda
+      // provisioner). withLaterSub fetches contact-list deltas. Without
+      // withDesc, me.public stays null even though the server has it.
       await me.subscribe(
-        tinode.MetaGetBuilder(me).withLaterSub(null).build(),
+        tinode.MetaGetBuilder(me).withDesc(null).withLaterSub(null).build(),
         null,
       );
 
@@ -425,6 +442,7 @@ class TicTacModule {
       appUserId: config.appUserId,
       appId: config.appId,
       appKey: config.appKey,
+      provision: config.provision,
     );
     final encodedSecret = base64.encode(secret.toBytes());
 
@@ -582,6 +600,7 @@ class TicTacModule {
       onUnresolvedMember: onUnresolvedMember,
       onUnresolvedPresence: onUnresolvedPresence,
       onUnresolvedTyping: onUnresolvedTyping,
+      onSelfPublicMissing: _setSelfPublicAppUserId,
     );
     controller.attachToTopic(topic);
     _topicControllers[topicId] = controller;
@@ -787,6 +806,31 @@ class TicTacModule {
     }
 
     return topics;
+  }
+
+  /// Write our own appUserId into me.public.appUserId. Called by
+  /// TopicController when it sees a self-subscription whose public lacks
+  /// the field (older accounts provisioned before the auth lambda started
+  /// setting it). Read-merge-write so we don't clobber other public fields
+  /// like fn / photo, and skipped if the value is already correct.
+  Future<void> _setSelfPublicAppUserId(String appUserId) async {
+    if (_tinode == null) return;
+    try {
+      final me = _tinode!.getMeTopic();
+      final Map<String, dynamic> merged = {};
+      if (me.public is Map) {
+        merged.addAll(Map<String, dynamic>.from(me.public as Map));
+      }
+      if (merged['appUserId'] == appUserId) return; // already correct
+      merged['appUserId'] = appUserId;
+
+      final params = tinode.SetParams()
+        ..desc = (tinode.TopicDescription()..public = merged);
+      await me.setMeta(params);
+      _log('Self-heal: wrote appUserId=$appUserId to me.public');
+    } catch (e) {
+      _log('Self-heal failed: $e');
+    }
   }
 
   void _log(String message) {

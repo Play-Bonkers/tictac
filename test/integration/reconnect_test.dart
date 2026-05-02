@@ -30,6 +30,10 @@ void main() {
       pongTimeout: pongTimeout,
       backgroundReconnectThreshold: const Duration(seconds: 2),
       authTokenProvider: () async => null,
+      // Tests use fresh app-user-ids each run; allow the auth Lambda to
+      // mint accounts. Production clients must leave this false — only
+      // the provisioner Lambda is allowed to set it true.
+      provision: true,
     );
   }
 

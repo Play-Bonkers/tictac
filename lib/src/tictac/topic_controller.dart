@@ -88,6 +88,11 @@ class TopicController extends ChangeNotifier {
   /// Return a fallback app user ID for a typing indicator, or null to skip.
   final String? Function(String tinodeUserId, String topicId)? onUnresolvedTyping;
 
+  /// Called when this controller resolves the current user's own appUserId
+  /// via TAILS (because their `me.public.appUserId` was missing). Lets
+  /// TicTacModule push the value back to Tinode so future reads find it.
+  final Future<void> Function(String appUserId)? onSelfPublicMissing;
+
   TopicController({
     required this.topicId,
     required this.userId,
@@ -97,6 +102,7 @@ class TopicController extends ChangeNotifier {
     this.onUnresolvedMember,
     this.onUnresolvedPresence,
     this.onUnresolvedTyping,
+    this.onSelfPublicMissing,
   }) {
     _user = _resolveUser(userId);
   }
@@ -449,18 +455,41 @@ class TopicController extends ChangeNotifier {
   void _handleMetaSub(tinode.TopicSubscription sub) {
     if (sub.user == null) return;
 
-    String? appUserId;
+    // Fast path: the user's appUserId is in their public profile (set by
+    // the auth-lambda provisioner via newacc.public). Use it directly.
+    String? cached;
     if (sub.public != null && sub.public is Map) {
-      appUserId = (sub.public as Map)['appUserId'];
+      cached = (sub.public as Map)['appUserId'];
+    }
+    if (cached != null && cached.isNotEmpty) {
+      identityResolver.addMapping(cached, sub.user!);
+      _completeMetaSub(sub, cached);
+      return;
     }
 
-    // Seed identity resolver
-    if (appUserId != null) {
-      identityResolver.addMapping(appUserId, sub.user!);
-    }
+    // Slow path: appUserId missing from public — fall back to TAILS via
+    // the resolver. If we successfully resolve and it turns out to be our
+    // own account, push the value back into me.public via the callback so
+    // future reads (this client and any peer) find it without round-tripping.
+    identityResolver.reverseLookup(sub.user!).then((resolved) {
+      final appUserId =
+          resolved ?? onUnresolvedMember?.call(sub.user!, topicId);
+      if (appUserId == null) return;
 
-    appUserId ??= onUnresolvedMember?.call(sub.user!, topicId);
-    if (appUserId == null) return;
+      if (appUserId == userId && onSelfPublicMissing != null) {
+        // Fire-and-forget — failure to write back doesn't block local resolution.
+        onSelfPublicMissing!(appUserId).catchError((e) {
+          debugPrint('TicTac: onSelfPublicMissing error: $e');
+        });
+      }
+
+      _completeMetaSub(sub, appUserId);
+    }).catchError((e) {
+      debugPrint('TicTac: _handleMetaSub reverseLookup error: $e');
+    });
+  }
+
+  void _completeMetaSub(tinode.TopicSubscription sub, String appUserId) {
     _memberMap[appUserId] = _resolveUser(appUserId);
     _presenceMap[appUserId] = sub.online ?? false;
   }

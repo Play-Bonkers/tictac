@@ -28,6 +28,11 @@ void main() {
       sessionId: 'test-session',
       generateRequestId: () => 'req-${DateTime.now().millisecondsSinceEpoch}',
       authTokenProvider: () async => null, // Direct Tinode connection, no JWT needed
+      // Tests fabricate fresh app-user-ids per run that have never been seen
+      // by TAILS. Setting provision=true lets the auth Lambda mint a Tinode
+      // account on first auth — this is the path the provisioner Lambda
+      // takes in production. Production client code must never set this.
+      provision: true,
     );
   }
 
@@ -68,6 +73,30 @@ void main() {
 
       await module2.deleteTopic(createdId, hard: true);
       await module2.disconnect();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Provisioner — verifies the auth Lambda writes appUserId into newly-
+  // created accounts' me.public. Targets the *deployed* Lambda; until the
+  // new authenticator binary is shipped to dev this will fail (Tinode
+  // account gets created with empty public).
+  // -------------------------------------------------------------------------
+
+  group('Provisioner', () {
+    test('newly provisioned account has appUserId in me.public', () async {
+      final userId = uniqueUserId();
+      final module = TicTacModule(makeConfig(userId));
+      await module.connect();
+
+      final pub = module.getSelfPublic();
+      expect(pub, isNotNull,
+          reason: 'me.public should be populated after provisioning');
+      expect(pub!['appUserId'], equals(userId),
+          reason: 'auth Lambda should write the caller\'s appUserId into '
+              'NewAcc.Public so peers can resolve it without TAILS round-trips');
+
+      await module.disconnect();
     });
   });
 
@@ -541,6 +570,7 @@ void main() {
         generateRequestId: () => 'req-${DateTime.now().millisecondsSinceEpoch}',
         tagsBaseUrl: tagsBaseUrl,
         authTokenProvider: () async => null,
+        provision: true,
       );
     }
 
@@ -674,42 +704,52 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('Unresolved identity callbacks', () {
-    test('onUnresolvedMessageAuthor provides fallback for message from unknown user', () async {
-      // User A sends a message. User B joins the same topic but uses a
-      // CachedIdentityResolver with NO mapping for A — so A's tinode ID
-      // can't be resolved. The callback provides a fallback.
+    test('onUnresolvedMessageAuthor is never invoked when sub.public seeds the resolver', () async {
+      // After the auth Lambda writes appUserId into every new account's
+      // me.public, B's resolver gets seeded with A's mapping the moment B
+      // subscribes to a shared topic — Tinode pushes A's subscription
+      // metadata and _handleMetaSub does identityResolver.addMapping(...).
+      // So A's inbound messages resolve via the cache, and the
+      // onUnresolvedMessageAuthor fallback is unreachable in this flow.
+      //
+      // We assert it by throwing from the callback: if it ever fires, the
+      // unhandled future error fails the test loudly. A regression in the
+      // public.appUserId seeding (provisioner change reverted, _handleMetaSub
+      // bypassed, etc.) would surface here.
       final userIdA = uniqueUserId();
       final userIdB = uniqueUserId();
       final moduleA = TicTacModule(makeConfig(userIdA));
       final moduleB = TicTacModule(
         makeConfig(userIdB),
         onUnresolvedMessageAuthor: (tinodeUserId, topicId) {
-          // Provide a fallback app user ID
-          return 'fallback-author';
+          throw StateError(
+            'onUnresolvedMessageAuthor should not fire — sub.public.appUserId '
+            'should have seeded the resolver. Got tinodeUserId=$tinodeUserId, '
+            'topicId=$topicId',
+          );
         },
       );
       await moduleA.connect();
       await moduleB.connect();
 
-      // A creates a group topic
-      final topic = await moduleA.createGroupTopic('unresolved-msg-test', []);
+      final topic = await moduleA.createGroupTopic('no-fallback-test', []);
       final controllerA = await moduleA.joinTopic(topic.id);
-
-      // B joins — B's identity resolver has NO mapping for A's tinode ID
       final controllerB = await moduleB.joinTopic(topic.id);
 
-      // A sends a message
       await controllerA.sendMessage(
-        const types.PartialText(text: 'hello from unknown'),
+        const types.PartialText(text: 'hello via cache'),
       );
 
       await Future.delayed(Duration(seconds: 3));
 
-      // B should have the message with the fallback author ID
+      // Message should arrive attributed to A's real appUserId — not a
+      // tinode UID, not a fallback string.
       final msg = controllerB.messages.whereType<types.TextMessage>().where(
-          (m) => m.text == 'hello from unknown').firstOrNull;
-      expect(msg, isNotNull, reason: 'B should receive message with fallback author');
-      expect(msg!.author.id, equals('fallback-author'));
+          (m) => m.text == 'hello via cache').firstOrNull;
+      expect(msg, isNotNull, reason: 'B should receive A\'s message');
+      expect(msg!.author.id, equals(userIdA),
+          reason: 'Author should resolve to A\'s appUserId via the cache '
+              'seeded from sub.public');
 
       await moduleA.deleteTopic(topic.id, hard: true);
       await moduleA.disconnect();
