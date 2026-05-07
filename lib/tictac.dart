@@ -23,6 +23,13 @@ export 'src/tictac/identity/cached_identity_resolver.dart'
 export 'src/tictac/identity/tags_identity_resolver.dart'
     show TagsIdentityResolver;
 
+// Voice (LiveKit)
+export 'src/tictac/voice/voice_module.dart'
+    show VoiceModule, VoiceTokenException;
+export 'src/tictac/voice/voice_session.dart' show VoiceSession;
+export 'src/tictac/voice/voice_participant.dart'
+    show VoiceParticipant, VoiceParticipantEvent;
+
 // Widget layer
 export 'src/tictac/tictac_chat.dart' show TicTacChat;
 export 'src/tictac/typing_dots.dart' show TicTacTypingDots, TicTacTypingDotsOptions;

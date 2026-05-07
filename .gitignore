@@ -15,3 +15,8 @@ build/
 
 # Directory created by dartdoc
 doc/api/
+
+# IDE
+.idea/
+*.iml
+.vscode/

@@ -66,6 +66,11 @@ class TicTacConfig {
   /// upgrade Authorization header.
   final Future<String?> Function() authTokenProvider;
 
+  /// Callback that returns the caller's Firebase ID token. Required for the
+  /// VoiceModule (LiveKit token-mint) but optional otherwise — text-chat
+  /// authenticates via [authTokenProvider]. When null, joinVoice will throw.
+  final Future<String?> Function()? getFirebaseIdToken;
+
   /// **Test-only.** When true, the encoded RestAuthSecret has its `provision`
   /// flag set, allowing the auth Lambda to mint a new Tinode account if no
   /// mapping exists. Production clients must leave this false — only the
@@ -96,6 +101,7 @@ class TicTacConfig {
     this.backgroundReconnectThreshold = const Duration(seconds: 30),
     this.tagsBaseUrl,
     required this.authTokenProvider,
+    this.getFirebaseIdToken,
     this.provision = false,
   });
 

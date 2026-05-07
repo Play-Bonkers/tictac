@@ -15,6 +15,7 @@ import 'package:tictac/src/tictac/identity/identity_resolver.dart';
 import 'package:tictac/src/tictac/identity/cached_identity_resolver.dart';
 import 'package:tictac/src/tictac/identity/tags_identity_resolver.dart';
 import 'package:tictac/src/tictac/topic_controller.dart';
+import 'package:tictac/src/tictac/voice/voice_module.dart';
 
 /// Main entry point for TicTac chat functionality.
 ///
@@ -55,6 +56,18 @@ class TicTacModule {
   final Map<String, TopicController> _topicControllers = {};
   final Map<String, String> _topicNames = {}; // topicId -> display name
   late IdentityResolver identityResolver;
+
+  VoiceModule? _voice;
+
+  /// Voice (LiveKit) entry point. Lazily constructed on first access.
+  /// Requires [TicTacConfig.tagsBaseUrl] and [TicTacConfig.getFirebaseIdToken]
+  /// to be set; without those, [VoiceModule.joinVoice] will throw.
+  VoiceModule get voice {
+    return _voice ??= VoiceModule(
+      config: config,
+      identityResolver: identityResolver,
+    );
+  }
 
   // Connection state
   final BehaviorSubject<TicTacConnectionState> _connectionState =
