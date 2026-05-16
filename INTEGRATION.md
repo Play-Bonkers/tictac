@@ -24,11 +24,11 @@ final tictac = TicTacModule(
     appId:      cfg.appId,
     appKey:     cfg.appKey,
     sessionId:  const Uuid().v4(),
-    tagsBaseUrl: cfg.tagsBaseUrl,
-    generateRequestId:  () => const Uuid().v4(),
-    authTokenProvider:  () => firebase.idToken,
-    getFirebaseIdToken: () => firebase.idToken,         // voice only
-    resolveAppUserId:   (tinodeUid) async => myCache[tinodeUid],
+    generateRequestId: () => const Uuid().v4(),
+    authTokenProvider: () => firebase.idToken,
+    resolveAppUserId:  (tinodeUid) async => myCache[tinodeUid],
+    // voice only — drop entirely if you don't use voice
+    mintVoiceToken:    (topicId) => host.mintLiveKitToken(topicId),
   ),
   TicTacCallbacks(
     onConnected:    (topics) => onReady(topics),

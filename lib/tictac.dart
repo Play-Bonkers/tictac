@@ -20,10 +20,10 @@ export 'src/tictac/models/chat_presence_state.dart' show ChatPresenceState;
 export 'src/tictac/models/message_preview.dart' show MessagePreview;
 
 // Voice (LiveKit)
-export 'src/tictac/voice/voice_module.dart' show VoiceTokenException;
 export 'src/tictac/voice/voice_session.dart' show VoiceSession;
 export 'src/tictac/voice/voice_callbacks.dart' show VoiceCallbacks;
 export 'src/tictac/voice/voice_participant.dart' show VoiceParticipant;
+export 'src/tictac/voice/voice_token.dart' show VoiceToken, VoiceTokenException;
 
 // Widget layer — opt-in convenience for flutter_chat_ui callers.
 export 'src/tictac/tictac_chat.dart' show TicTacChat;

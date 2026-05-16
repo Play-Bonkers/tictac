@@ -1,3 +1,5 @@
+import 'package:tictac/src/tictac/voice/voice_token.dart';
+
 class TicTacConfig {
   /// Tinode server host (e.g. "44.234.36.7")
   final String tinodeHost;
@@ -56,35 +58,47 @@ class TicTacConfig {
   /// How long the app can be backgrounded before forcing a reconnect (default: 30s)
   final Duration backgroundReconnectThreshold;
 
-  /// TAGS base URL — only consumed by the voice module today
-  /// (LiveKit token-mint endpoint). Identity resolution moved off this
-  /// onto the [resolveAppUserId] callback (see below).
-  final String? tagsBaseUrl;
-
   /// Callback that returns the current auth token (e.g. Cognito JWT).
   /// Called on every connect/reconnect to get a fresh token for the websocket
   /// upgrade Authorization header.
   final Future<String?> Function() authTokenProvider;
-
-  /// Callback that returns the caller's Firebase ID token. Required for the
-  /// VoiceModule (LiveKit token-mint) but optional otherwise — text-chat
-  /// authenticates via [authTokenProvider]. When null, joinVoice will throw.
-  final Future<String?> Function()? getFirebaseIdToken;
 
   /// Maps a Tinode user id (e.g. `usrAbCd1234`) to an app user id, or
   /// returns null if the host doesn't know the mapping.
   ///
   /// Called potentially per-event during message / presence / typing /
   /// member resolution. **TicTac does not cache.** Wrap your
-  /// implementation in a `Map`-backed cache if you want one — the
-  /// signature is intentionally `Future` so a TAILS lookup is a
-  /// single-line wrapper.
+  /// implementation in a `Map`-backed cache if you want one.
   ///
   /// Returning null means "unknown, drop this event" (no message
-  /// surfaced, no member added, no presence emitted). Callers should
-  /// only return null when they have no chance of resolving the id from
-  /// any source they own.
+  /// surfaced, no member added, no presence emitted).
   final Future<String?> Function(String tinodeUserId) resolveAppUserId;
+
+  /// Mints a LiveKit access token for a topic. The host owns the HTTP
+  /// call — tictac doesn't know about TAGS, Lambda endpoints, or
+  /// Firebase. Required only if the host calls
+  /// [TicTacModule.joinVoice]; throws otherwise.
+  ///
+  /// Implementation pattern (BonkersClient):
+  /// ```dart
+  /// mintVoiceToken: (topicId) async {
+  ///   final resp = await http.post(
+  ///     Uri.parse('$tagsBaseUrl/voice/token'),
+  ///     headers: {
+  ///       'authorization': 'Bearer ${await firebase.idToken}',
+  ///       'x-app-id': appId, 'x-app-key': appKey,
+  ///     },
+  ///     body: jsonEncode({'topic_id': topicId, 'app_user_id': appUserId}),
+  ///   );
+  ///   final body = jsonDecode(resp.body);
+  ///   return VoiceToken(
+  ///     accessToken: body['token'],
+  ///     livekitUrl:  body['livekit_url'],
+  ///     room:        body['room'],
+  ///   );
+  /// },
+  /// ```
+  final Future<VoiceToken> Function(String topicId)? mintVoiceToken;
 
   /// **Test-only.** When true, the encoded RestAuthSecret has its `provision`
   /// flag set, allowing the auth Lambda to mint a new Tinode account if no
@@ -114,10 +128,9 @@ class TicTacConfig {
     this.heartbeatInterval = const Duration(seconds: 12),
     this.pongTimeout = const Duration(seconds: 5),
     this.backgroundReconnectThreshold = const Duration(seconds: 30),
-    this.tagsBaseUrl,
     required this.authTokenProvider,
-    this.getFirebaseIdToken,
     required this.resolveAppUserId,
+    this.mintVoiceToken,
     this.provision = false,
   });
 
