@@ -58,9 +58,35 @@ To customize or skin, pass any `flutter_chat_ui` [Chat] prop to
 | Field | When called | Notes |
 |---|---|---|
 | `generateRequestId` | per outbound packet | UUID v4 is fine. |
-| `authTokenProvider` | every `connect()` / `reconnect()` | Return the **fresh** value — don't cache. Null skips the Authorization header. |
-| `getFirebaseIdToken` | per `tictac.joinVoice(...)` | Voice only. Usually the same source as `authTokenProvider`. |
+| `authTokenProvider` | every `connect()` / `reconnect()` | Returns the Tinode websocket auth token. Return the **fresh** value — don't cache. Null skips the Authorization header. |
 | `resolveAppUserId(tinodeUid)` | every message / presence / typing / member event from an unknown user | Tinode UIDs in, app user ids out. Return null → drop the event. TicTac does not cache — wrap with a `Map`-backed cache if you want one. |
+| `mintVoiceToken(topicId)` | per `joinVoice(...)` | **Voice only** — omit entirely if you don't use voice. Returns a `VoiceToken { accessToken, livekitUrl, room }`. Host owns the HTTP roundtrip to whatever mint endpoint it runs; tictac doesn't know about TAGS, Lambda, or Firebase. |
+
+### Example `mintVoiceToken` (BonkersClient pattern)
+
+```dart
+mintVoiceToken: (topicId) async {
+  final resp = await http.post(
+    Uri.parse('$tagsBaseUrl/voice/token'),
+    headers: {
+      'content-type': 'application/json',
+      'authorization': 'Bearer ${await firebase.idToken}',
+      'x-app-id': appId,
+      'x-app-key': appKey,
+    },
+    body: jsonEncode({'topic_id': topicId, 'app_user_id': appUserId}),
+  );
+  if (resp.statusCode != 200) {
+    throw VoiceTokenException(statusCode: resp.statusCode, body: resp.body);
+  }
+  final body = jsonDecode(resp.body);
+  return VoiceToken(
+    accessToken: body['token'],
+    livekitUrl:  body['livekit_url'],
+    room:        body['room'],
+  );
+},
+```
 
 ---
 
@@ -154,17 +180,32 @@ After resolve, the same callbacks fire on live updates.
 
 ### Custom messages — send + render
 
+**Send** — `TopicHandle.sendCustom` from anywhere:
+
 ```dart
-// Send
 await topic.sendCustom(
   'GameRequest',
   {'gameId': 'Chess', 'gameName': 'Chess'},
   fallbackText: 'Game request: Chess',
 );
+```
 
-// Receive — your onMessageReceived handler (or TicTacChat's
-// customMessageBuilder) dispatches on metadata['customType']:
-Widget _buildCustomMessage(types.CustomMessage msg, {required int messageWidth}) {
+**Render**, widget path — pass `customMessageBuilder:` to `TicTacChat`
+(it's a `flutter_chat_ui` pass-through prop). The widget forwards it
+into the `Chat` widget; flutter_chat_ui invokes it for every
+`types.CustomMessage` in the list:
+
+```dart
+TicTacChat(
+  module: tictac,
+  topicId: topicId,
+  customMessageBuilder: _buildCustomMessage,   // <-- here
+)
+
+Widget _buildCustomMessage(
+  types.CustomMessage msg, {
+  required int messageWidth,
+}) {
   switch (msg.metadata?['customType'] as String?) {
     case 'GameRequest':   return GameRequestWidget(msg);
     case 'GameChallenge': return GameChallengeWidget(msg);
@@ -172,6 +213,21 @@ Widget _buildCustomMessage(types.CustomMessage msg, {required int messageWidth})
       return Text(msg.metadata?['fallbackText'] ?? '[unknown]');
   }
 }
+```
+
+**Render**, custom-UI path (no `TicTacChat`) — there's no builder; you
+dispatch inside your `onMessageReceived` handler when you accumulate
+messages into your own state:
+
+```dart
+TicTacCallbacks(
+  onMessageReceived: (topicId, msg) {
+    if (msg is types.CustomMessage) {
+      // route on msg.metadata?['customType'] before / after storing it.
+    }
+    myMessageStore.upsert(topicId, msg);
+  },
+)
 ```
 
 `customType` strings are app-level. TicTac doesn't validate them. Keep
