@@ -30,6 +30,11 @@ fallbacks at two layers. v3 collapses everything onto one paradigm
 - `TicTacConfig.resolveAppUserId` — single host-supplied callback for
   Tinode UID → app user id resolution. TicTac does not cache; wrap your
   implementation if you want caching.
+- `TicTacConfig.mintVoiceToken` — single host-supplied callback returning
+  a `VoiceToken { accessToken, livekitUrl, room }`. TicTac no longer
+  knows about TAGS, Lambda endpoints, or Firebase — the host owns the
+  mint HTTP call.
+- `VoiceToken` — value type returned by `mintVoiceToken`.
 - `INTEGRATION.md` — full integration guide for the new surface.
 
 ### Changed (BREAKING)
@@ -61,6 +66,10 @@ fallbacks at two layers. v3 collapses everything onto one paradigm
   by which callback fired, not a field on the participant.
 - The four module-level `onUnresolvedX` callbacks — `resolveAppUserId`
   returning null is the single signal.
+- `TicTacConfig.tagsBaseUrl` — voice's token-mint endpoint baked TAGS
+  into the library. Replaced by the host-owned `mintVoiceToken`.
+- `TicTacConfig.getFirebaseIdToken` — was only used to auth the TAGS
+  mint call. With `mintVoiceToken` the host owns its own auth.
 
 ### Migration
 
