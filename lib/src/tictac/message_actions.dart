@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_chat_types/flutter_chat_types.dart' as types;
 
-import 'topic_controller.dart';
+import 'topic_handle.dart';
 
 class TicTacMessageActionItem {
   final IconData icon;
@@ -51,10 +51,19 @@ class TicTacMessageActionsOptions {
   });
 }
 
+/// True when [message] is the internal "typing-placeholder" custom message
+/// that `TicTacChat` injects to render typing dots inside the message list.
+/// Kept as a free function so callers (e.g. the actions menu) can skip it
+/// without taking on the placeholder vocabulary.
+bool _isTypingPlaceholder(types.Message msg) =>
+    msg is types.CustomMessage &&
+    msg.metadata != null &&
+    msg.metadata!['type'] == 'typing';
+
 void showTicTacMessageActions({
   required BuildContext context,
   required types.Message message,
-  required TopicController controller,
+  required TopicHandle topic,
   required String currentUserId,
   required TicTacMessageActionsOptions options,
 }) {
@@ -64,7 +73,7 @@ void showTicTacMessageActions({
   if (!shouldShow) return;
 
   // Skip typing placeholders
-  if (TopicController.isTypingPlaceholder(message)) return;
+  if (_isTypingPlaceholder(message)) return;
 
   // Full custom builder
   if (options.builder != null) {
@@ -104,7 +113,7 @@ void showTicTacMessageActions({
       icon: options.deleteIcon,
       label: options.deleteLabel,
       color: options.deleteColor,
-      onTap: () => controller.deleteMessage(message.id),
+      onTap: () => topic.deleteMessage(message.id),
     ));
   }
 

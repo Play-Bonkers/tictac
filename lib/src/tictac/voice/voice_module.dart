@@ -3,8 +3,8 @@ import 'dart:io';
 
 import 'package:livekit_client/livekit_client.dart' as lk;
 
-import 'package:tictac/src/tictac/identity/identity_resolver.dart';
 import 'package:tictac/src/tictac/tictac_config.dart';
+import 'package:tictac/src/tictac/voice/voice_callbacks.dart';
 import 'package:tictac/src/tictac/voice/voice_session.dart';
 
 /// Voice support for tictac, backed by LiveKit.
@@ -19,21 +19,22 @@ import 'package:tictac/src/tictac/voice/voice_session.dart';
 /// by [TicTacModule], consistent with the rest of tictac.
 class VoiceModule {
   final TicTacConfig _config;
-  final IdentityResolver _identityResolver;
   final HttpClient _httpClient = HttpClient();
 
-  VoiceModule({
-    required TicTacConfig config,
-    required IdentityResolver identityResolver,
-  })  : _config = config,
-        _identityResolver = identityResolver {
+  VoiceModule({required TicTacConfig config}) : _config = config {
     _httpClient.connectionTimeout = const Duration(seconds: 5);
   }
 
   /// Mint a token for [topicId] and connect to the corresponding LiveKit
   /// room. The caller must already be subscribed to [topicId] in Tinode —
   /// the server verifies this and rejects with 403 otherwise.
-  Future<VoiceSession> joinVoice(String topicId) async {
+  ///
+  /// All voice events (participants joining / leaving, speaking, mute
+  /// changes) fire through [callbacks].
+  Future<VoiceSession> joinVoice(
+    String topicId,
+    VoiceCallbacks callbacks,
+  ) async {
     final tagsBaseUrl = _config.tagsBaseUrl;
     if (tagsBaseUrl == null || tagsBaseUrl.isEmpty) {
       throw StateError(
@@ -77,7 +78,8 @@ class VoiceModule {
     return VoiceSession(
       room: room,
       livekitRoom: lkRoom,
-      identityResolver: _identityResolver,
+      resolveAppUserId: _config.resolveAppUserId,
+      callbacks: callbacks,
     );
   }
 

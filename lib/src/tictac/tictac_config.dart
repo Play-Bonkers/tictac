@@ -56,9 +56,9 @@ class TicTacConfig {
   /// How long the app can be backgrounded before forcing a reconnect (default: 30s)
   final Duration backgroundReconnectThreshold;
 
-  /// TAGS base URL for identity resolution (e.g. "https://dev-tags.playbonkers.com")
-  /// When set, enables TagsIdentityResolver for resolving app user IDs via TAILS.
-  /// When null, uses CachedIdentityResolver (local cache only).
+  /// TAGS base URL — only consumed by the voice module today
+  /// (LiveKit token-mint endpoint). Identity resolution moved off this
+  /// onto the [resolveAppUserId] callback (see below).
   final String? tagsBaseUrl;
 
   /// Callback that returns the current auth token (e.g. Cognito JWT).
@@ -70,6 +70,21 @@ class TicTacConfig {
   /// VoiceModule (LiveKit token-mint) but optional otherwise — text-chat
   /// authenticates via [authTokenProvider]. When null, joinVoice will throw.
   final Future<String?> Function()? getFirebaseIdToken;
+
+  /// Maps a Tinode user id (e.g. `usrAbCd1234`) to an app user id, or
+  /// returns null if the host doesn't know the mapping.
+  ///
+  /// Called potentially per-event during message / presence / typing /
+  /// member resolution. **TicTac does not cache.** Wrap your
+  /// implementation in a `Map`-backed cache if you want one — the
+  /// signature is intentionally `Future` so a TAILS lookup is a
+  /// single-line wrapper.
+  ///
+  /// Returning null means "unknown, drop this event" (no message
+  /// surfaced, no member added, no presence emitted). Callers should
+  /// only return null when they have no chance of resolving the id from
+  /// any source they own.
+  final Future<String?> Function(String tinodeUserId) resolveAppUserId;
 
   /// **Test-only.** When true, the encoded RestAuthSecret has its `provision`
   /// flag set, allowing the auth Lambda to mint a new Tinode account if no
@@ -102,6 +117,7 @@ class TicTacConfig {
     this.tagsBaseUrl,
     required this.authTokenProvider,
     this.getFirebaseIdToken,
+    required this.resolveAppUserId,
     this.provision = false,
   });
 

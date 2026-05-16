@@ -7,15 +7,49 @@ import 'package:flutter_chat_ui/src/models/date_header.dart';
 import 'package:flutter_chat_types/flutter_chat_types.dart' as types;
 import 'package:intl/intl.dart';
 import 'package:scroll_to_index/scroll_to_index.dart';
+import 'package:uuid/uuid.dart';
 
-import 'topic_controller.dart';
-import 'user_avatar.dart';
 import 'message_actions.dart';
+import 'tictac_callbacks.dart';
+import 'tictac_module.dart';
+import 'topic_handle.dart';
 import 'typing_dots.dart';
+import 'user_avatar.dart';
 
+const _uuid = Uuid();
+const _typingPlaceholderPrefix = 'typing-placeholder-';
+String _typingPlaceholderId(String userId) =>
+    '$_typingPlaceholderPrefix$userId';
+bool _isTypingPlaceholder(types.Message m) =>
+    m is types.CustomMessage &&
+    m.metadata != null &&
+    m.metadata!['type'] == 'typing';
+
+/// Drop-in chat widget that wraps `flutter_chat_ui`'s [Chat] for a given
+/// topic.
+///
+/// Behavior:
+/// * On mount, calls [TicTacModule.joinTopic] and registers an internal
+///   [TicTacCallbacks] bag for the events it needs (`onMessageReceived`,
+///   `onMemberAdded`, `onTopicPresenceChanged`, `onTypingStarted`,
+///   `onMessageDeleted`).
+/// * Accumulates messages, members, and presence into its own state and
+///   pushes them into [Chat] on every change.
+/// * Owns the optimistic-send → server-echo swap, the 3-second typing
+///   auto-clear, and per-message read-receipt firing on visibility.
+///
+/// **What you can override.** All `flutter_chat_ui` [Chat] props are
+/// forwarded — pass any builder, theme, or option to customize.
+/// Pass `customMessageBuilder` to render your own custom message types.
+///
+/// **What you can not change here.** The state model (message list,
+/// member map, presence, typing) is internal — if you need a different
+/// shape, register your own callbacks on the module and build a
+/// different UI.
 class TicTacChat extends StatefulWidget {
   TicTacChat({
-    required this.controller,
+    required this.module,
+    required this.topicId,
     // ---- TicTac-specific ----
     this.typingDotsOptions,
     this.messageActionsOptions,
@@ -84,7 +118,8 @@ class TicTacChat extends StatefulWidget {
     super.key,
   });
 
-  final TopicController controller;
+  final TicTacModule module;
+  final String topicId;
   final TicTacTypingDotsOptions? typingDotsOptions;
   final TicTacMessageActionsOptions? messageActionsOptions;
 
@@ -178,35 +213,181 @@ class TicTacChat extends StatefulWidget {
 }
 
 class _TicTacChatState extends State<TicTacChat> {
-  TopicController get _controller => widget.controller;
   late final types.User _user;
+  late final TextEditingController _inputController;
   Timer? _typingDebounce;
   bool _disposed = false;
 
-  late final TextEditingController _inputController;
+  // Internal state — accumulates from callbacks on TicTacModule.
+  final List<types.Message> _messages = [];     // newest-first
+  final Map<String, types.User> _members = {};  // app user id → User
+  final Map<String, bool> _presence = {};       // app user id → online
+  final Set<String> _typingUserIds = {};
+  final Map<String, Timer> _typingTimers = {};
+
+  // Optimistic-send tracking: client-generated id → still pending?
+  final Set<String> _pendingClientIds = {};
+
+  TopicHandle? _topic;
+  String? _lastReadMessageId;
+
+  // Our callback bag — registered on the module via addCallbacks at
+  // mount and removed on dispose. Holding by reference (not identity-
+  // hashed) so removal hits the exact same instance.
+  late final TicTacCallbacks _ownCallbacks;
 
   @override
   void initState() {
     super.initState();
     _inputController = TextEditingController();
-    _controller.addListener(_onControllerChanged);
-    _user = types.User(id: _controller.userId);
+    _user = types.User(id: widget.module.config.appUserId);
+    _ownCallbacks = TicTacCallbacks(
+      onMessageReceived: (topicId, msg) {
+        if (topicId == widget.topicId) _handleMessage(msg);
+      },
+      onMessageDeleted: (topicId, msgId) {
+        if (topicId == widget.topicId) _handleMessageDeleted(msgId);
+      },
+      onMemberAdded: (topicId, member) {
+        if (topicId == widget.topicId) _handleMemberAdded(member);
+      },
+      onMemberRemoved: (topicId, appUserId) {
+        if (topicId == widget.topicId) _handleMemberRemoved(appUserId);
+      },
+      onTopicPresenceChanged: (topicId, appUserId, isOnline) {
+        if (topicId == widget.topicId) _handlePresence(appUserId, isOnline);
+      },
+      onTypingStarted: (topicId, appUserId) {
+        if (topicId == widget.topicId) _markTyping(appUserId);
+      },
+    );
+    widget.module.addCallbacks(_ownCallbacks);
+    _joinTopic();
+  }
+
+  Future<void> _joinTopic() async {
+    _topic = await widget.module.joinTopic(widget.topicId);
+    if (_disposed) {
+      _topic?.leave();
+      _topic = null;
+    }
   }
 
   @override
   void dispose() {
     _disposed = true;
     _typingDebounce?.cancel();
-    _controller.removeListener(_onControllerChanged);
-    // Don't dispose _inputController — flutter_chat_ui's Input widget
-    // takes ownership and disposes it during its own unmount.
+    for (final t in _typingTimers.values) {
+      t.cancel();
+    }
+    _typingTimers.clear();
+    widget.module.removeCallbacks(_ownCallbacks);
+    _topic?.leave();
+    // _inputController is owned by flutter_chat_ui's Input — do not dispose
     super.dispose();
   }
 
-  void _onControllerChanged() {
-    if (!_disposed && mounted) {
+  // ---------------------------------------------------------------------------
+  // Callback handlers
+  // ---------------------------------------------------------------------------
+
+  void _handleMessage(types.Message msg) {
+    if (_disposed) return;
+
+    // Replace optimistic placeholder, if any.
+    if (msg.author.id == _user.id) {
+      final pending = _messages.indexWhere((m) =>
+          m.author.id == _user.id &&
+          m.status == types.Status.sending &&
+          _pendingClientIds.contains(m.id));
+      if (pending >= 0) {
+        _pendingClientIds.remove(_messages[pending].id);
+        _messages[pending] = msg;
+        setState(() {});
+        return;
+      }
+    }
+
+    // Clear typing placeholder for this author.
+    _typingUserIds.remove(msg.author.id);
+    _typingTimers.remove(msg.author.id)?.cancel();
+    _messages.removeWhere((m) => m.id == _typingPlaceholderId(msg.author.id));
+
+    // Dedupe by id, insert newest-first.
+    final idx = _messages.indexWhere((m) => m.id == msg.id);
+    if (idx >= 0) {
+      _messages[idx] = msg;
+    } else {
+      _insertInOrder(msg);
+    }
+
+    // Track member if we haven't seen them.
+    _members.putIfAbsent(msg.author.id, () => msg.author);
+
+    setState(() {});
+  }
+
+  void _handleMessageDeleted(String messageId) {
+    final removed = _messages.length;
+    _messages.removeWhere((m) => m.id == messageId);
+    if (_messages.length != removed) setState(() {});
+  }
+
+  void _handleMemberAdded(types.User member) {
+    if (_members[member.id] != null) return;
+    _members[member.id] = member;
+    setState(() {});
+  }
+
+  void _handleMemberRemoved(String appUserId) {
+    if (_members.remove(appUserId) != null) {
+      _presence.remove(appUserId);
       setState(() {});
     }
+  }
+
+  void _handlePresence(String appUserId, bool isOnline) {
+    if (_presence[appUserId] == isOnline) return;
+    _presence[appUserId] = isOnline;
+    setState(() {});
+  }
+
+  void _markTyping(String appUserId) {
+    if (appUserId == _user.id) return;
+
+    final wasTyping = _typingUserIds.add(appUserId);
+    final placeholderId = _typingPlaceholderId(appUserId);
+    if (wasTyping && !_messages.any((m) => m.id == placeholderId)) {
+      final user = _members[appUserId] ?? types.User(id: appUserId);
+      _messages.insert(
+        0,
+        types.CustomMessage(
+          id: placeholderId,
+          author: user,
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+          metadata: const {'type': 'typing'},
+        ),
+      );
+    }
+
+    _typingTimers[appUserId]?.cancel();
+    _typingTimers[appUserId] = Timer(const Duration(seconds: 3), () {
+      _typingUserIds.remove(appUserId);
+      _typingTimers.remove(appUserId);
+      _messages.removeWhere((m) => m.id == placeholderId);
+      if (mounted) setState(() {});
+    });
+
+    if (wasTyping) setState(() {});
+  }
+
+  void _insertInOrder(types.Message msg) {
+    final ts = msg.createdAt ?? 0;
+    var i = 0;
+    while (i < _messages.length && (_messages[i].createdAt ?? 0) > ts) {
+      i++;
+    }
+    _messages.insert(i, msg);
   }
 
   // ---------------------------------------------------------------------------
@@ -214,7 +395,48 @@ class _TicTacChatState extends State<TicTacChat> {
   // ---------------------------------------------------------------------------
 
   void _handleSend(types.PartialText partial) {
-    _controller.sendMessage(partial);
+    final topic = _topic;
+    if (topic == null) return;
+
+    final clientId = _uuid.v4();
+    final optimistic = types.TextMessage(
+      id: clientId,
+      author: _user,
+      text: partial.text,
+      createdAt: DateTime.now().millisecondsSinceEpoch,
+      status: types.Status.sending,
+    );
+    _messages.insert(0, optimistic);
+    _pendingClientIds.add(clientId);
+    setState(() {});
+
+    topic.sendText(partial.text).catchError((e) {
+      _pendingClientIds.remove(clientId);
+      final idx = _messages.indexWhere((m) => m.id == clientId);
+      if (idx >= 0) {
+        final orig = _messages[idx];
+        if (orig is types.TextMessage) {
+          _messages[idx] = types.TextMessage(
+            id: orig.id,
+            author: orig.author,
+            text: orig.text,
+            createdAt: orig.createdAt,
+            status: types.Status.error,
+          );
+          if (mounted) setState(() {});
+        }
+      }
+      debugPrint('TicTacChat: send error: $e');
+    });
+  }
+
+  void _onTextChangedWithTyping(String text) {
+    _topic?.setTyping(true);
+    _typingDebounce?.cancel();
+    _typingDebounce = Timer(const Duration(seconds: 2), () {
+      // Tinode has no "stop typing" event; nothing to send. The peer
+      // side clears its placeholder on its own 3s timer.
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -224,10 +446,9 @@ class _TicTacChatState extends State<TicTacChat> {
   @override
   Widget build(BuildContext context) {
     return Chat(
-      messages: _controller.messages,
+      messages: _messages,
       user: _user,
       onSendPressed: _handleSend,
-      // -- Defaults --
       showUserAvatars: widget.showUserAvatars ?? false,
       showUserNames: widget.showUserNames ?? false,
       dateHeaderThreshold: widget.dateHeaderThreshold ?? 900000,
@@ -235,23 +456,18 @@ class _TicTacChatState extends State<TicTacChat> {
       messageWidthRatio: widget.messageWidthRatio ?? 0.72,
       emojiEnlargementBehavior:
           widget.emojiEnlargementBehavior ?? EmojiEnlargementBehavior.multi,
-      hideBackgroundOnEmojiMessages:
-          widget.hideBackgroundOnEmojiMessages ?? true,
+      hideBackgroundOnEmojiMessages: widget.hideBackgroundOnEmojiMessages ?? true,
       dateFormat: widget.dateFormat,
       timeFormat: widget.timeFormat,
       useTopSafeAreaInset: widget.useTopSafeAreaInset,
-      // -- Input --
       inputOptions: _buildInputOptions(),
       keyboardDismissBehavior: widget.keyboardDismissBehavior ??
           ScrollViewKeyboardDismissBehavior.manual,
-      // -- Features --
       onAttachmentPressed: widget.onAttachmentPressed,
       disableImageGallery: widget.disableImageGallery,
       usePreviewData: widget.usePreviewData ?? true,
-      // -- Theme --
       theme: widget.theme ?? const DefaultChatTheme(),
       l10n: widget.l10n ?? const ChatL10nEn(),
-      // -- Pass-through --
       audioMessageBuilder: widget.audioMessageBuilder,
       avatarBuilder: widget.avatarBuilder ?? _buildDefaultAvatarBuilder(),
       bubbleBuilder: widget.bubbleBuilder,
@@ -265,7 +481,8 @@ class _TicTacChatState extends State<TicTacChat> {
       dateLocale: widget.dateLocale,
       emptyState: widget.emptyState,
       fileMessageBuilder: widget.fileMessageBuilder,
-      imageGalleryOptions: widget.imageGalleryOptions ?? const ImageGalleryOptions(),
+      imageGalleryOptions:
+          widget.imageGalleryOptions ?? const ImageGalleryOptions(),
       imageHeaders: widget.imageHeaders,
       imageMessageBuilder: widget.imageMessageBuilder,
       imageProviderBuilder: widget.imageProviderBuilder,
@@ -301,12 +518,12 @@ class _TicTacChatState extends State<TicTacChat> {
   }
 
   // ---------------------------------------------------------------------------
-  // Avatar builder
+  // flutter_chat_ui hooks
   // ---------------------------------------------------------------------------
 
   Widget Function(types.User author)? _buildDefaultAvatarBuilder() {
     return (types.User author) {
-      final isOnline = _controller.isOnline(author.id);
+      final isOnline = _presence[author.id] ?? false;
       if (widget.userAvatarBuilder != null) {
         return widget.userAvatarBuilder!(author.id, isOnline);
       }
@@ -317,18 +534,6 @@ class _TicTacChatState extends State<TicTacChat> {
         size: 32,
       );
     };
-  }
-
-  // ---------------------------------------------------------------------------
-  // Typing event on text change
-  // ---------------------------------------------------------------------------
-
-  void _onTextChangedWithTyping(String text) {
-    _controller.setTyping(true);
-    _typingDebounce?.cancel();
-    _typingDebounce = Timer(const Duration(seconds: 2), () {
-      _controller.setTyping(false);
-    });
   }
 
   InputOptions _buildInputOptions() {
@@ -350,31 +555,25 @@ class _TicTacChatState extends State<TicTacChat> {
         enabled: opts.enabled,
       );
     }
-
     return InputOptions(
       onTextChanged: _onTextChangedWithTyping,
       textEditingController: _inputController,
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Visibility → markRead
-  // ---------------------------------------------------------------------------
-
   void Function(types.Message, bool)? _wrapVisibilityChanged() {
     return (types.Message message, bool visible) {
       widget.onMessageVisibilityChanged?.call(message, visible);
       if (visible &&
           message.author.id != _user.id &&
-          !TopicController.isTypingPlaceholder(message)) {
-        _controller.markRead(message.id);
+          !_isTypingPlaceholder(message)) {
+        if (message.id != _lastReadMessageId) {
+          _lastReadMessageId = message.id;
+          _topic?.markRead(message.id);
+        }
       }
     };
   }
-
-  // ---------------------------------------------------------------------------
-  // Long press → message actions
-  // ---------------------------------------------------------------------------
 
   void Function(BuildContext, types.Message)? _wrapMessageLongPress() {
     if (widget.onMessageLongPress != null) return widget.onMessageLongPress;
@@ -382,21 +581,19 @@ class _TicTacChatState extends State<TicTacChat> {
     final opts =
         widget.messageActionsOptions ?? const TicTacMessageActionsOptions();
     if (!opts.enabled) return null;
+    final topic = _topic;
+    if (topic == null) return null;
 
     return (BuildContext ctx, types.Message message) {
       showTicTacMessageActions(
         context: ctx,
         message: message,
-        controller: _controller,
+        topic: topic,
         currentUserId: _user.id,
         options: opts,
       );
     };
   }
-
-  // ---------------------------------------------------------------------------
-  // Custom message builder (typing dots)
-  // ---------------------------------------------------------------------------
 
   Widget Function(types.CustomMessage, {required int messageWidth})?
       _wrapCustomMessageBuilder() {
@@ -416,22 +613,14 @@ class _TicTacChatState extends State<TicTacChat> {
     };
   }
 
-  // ---------------------------------------------------------------------------
-  // Typing indicator options
-  // ---------------------------------------------------------------------------
-
   TypingIndicatorOptions _buildTypingIndicatorOptions() {
-    final users = _controller.typingUsers;
+    final users = _typingUserIds
+        .map((id) => _members[id] ?? types.User(id: id))
+        .toList(growable: false);
     final dotsEnabled =
         (widget.typingDotsOptions ?? const TicTacTypingDotsOptions()).enabled;
 
-    // Suppress the built-in typing indicator when placeholder dots are active
-    Widget Function({
-      required BuildContext context,
-      required BubbleRtlAlignment bubbleAlignment,
-      required TypingIndicatorOptions options,
-      required bool indicatorOnScrollStatus,
-    })? suppressBuilder = dotsEnabled
+    final suppressBuilder = dotsEnabled
         ? ({
             required BuildContext context,
             required BubbleRtlAlignment bubbleAlignment,
