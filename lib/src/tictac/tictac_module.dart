@@ -73,6 +73,16 @@ class TicTacModule {
   DateTime? _firstFailureTime;
   final _random = Random();
 
+  // Coalesce concurrent connect() calls. Multiple paths can race the
+  // first connect (host bridge calling connect() at app start AND the
+  // lifecycle observer firing _onAppResumed → _smartReconnect →
+  // connect() before the first one completes). Without this guard, both
+  // callers reassign _tinode and its stream subscriptions; the
+  // heartbeat ends up listening on one Tinode while probing another and
+  // never declares-dead. The actual symptom: ~50s of silence after a
+  // dropped socket before the SDK itself eventually times out.
+  Future<void>? _connecting;
+
   // Diff source: previous topic-id set, used to fire add/remove/update
   // when Tinode dumps the full sub list.
   final Set<String> _knownTopicIds = {};
@@ -125,7 +135,17 @@ class TicTacModule {
 
   /// Connect, authenticate, and fire `onConnected(topics)`. Idempotent
   /// reconnects re-fire `onConnected` with a fresh topic list.
-  Future<void> connect() async {
+  Future<void> connect() {
+    final inflight = _connecting;
+    if (inflight != null) return inflight;
+    final future = _doConnect();
+    _connecting = future;
+    return future.whenComplete(() {
+      if (identical(_connecting, future)) _connecting = null;
+    });
+  }
+
+  Future<void> _doConnect() async {
     _intentionalDisconnect = false;
     _connectionState.add(TicTacConnectionState.connecting);
 
@@ -158,7 +178,17 @@ class TicTacModule {
         _scheduleReconnect();
       });
 
-      await _tinode!.connect();
+      await _tinode!.connect().timeout(
+        config.connectTimeout,
+        onTimeout: () {
+          // Force the SDK socket closed so subsequent reconnect attempts
+          // don't reuse a half-open Tinode instance.
+          _tinode?.disconnect();
+          throw TimeoutException(
+            'Tinode connect did not complete within ${config.connectTimeout.inSeconds}s',
+          );
+        },
+      );
       _log('Connected to ${config.wsHostPort}');
 
       await _authenticate();
@@ -330,10 +360,20 @@ class TicTacModule {
   /// Join a topic. Wires up event listeners and emits cached messages,
   /// members, and presence through the callback bag. Returns a
   /// methods-only handle for sending / leaving / etc.
+  ///
+  /// Re-joining a still-active topic is a cache hit: returns the same
+  /// handle and replays the SDK's locally-cached messages through
+  /// onMessageReceived so a re-mounted UI populates without hitting the
+  /// network.
   Future<TopicHandle> joinTopic(String topicId) async {
     await _ensureConnected();
-    if (_activeTopics.containsKey(topicId)) {
-      return _activeTopics[topicId]!.handle;
+    final existing = _activeTopics[topicId];
+    if (existing != null) {
+      // Defer to the next microtask so the caller has a chance to
+      // register its callbacks (most callers do addCallbacks → joinTopic
+      // back to back) before we start firing onMessageReceived.
+      scheduleMicrotask(() => existing.replayCachedMessages());
+      return existing.handle;
     }
 
     final topic = _tinode!.getTopic(topicId);
@@ -405,6 +445,10 @@ class TicTacModule {
     final wasBg = _backgroundedAt;
     _backgroundedAt = null;
     if (_intentionalDisconnect) return;
+    // A connect is already in flight (most commonly: the host called
+    // connect() at app boot, then Flutter fired resumed during the same
+    // first frame). Don't trampoline — let the in-flight attempt finish.
+    if (_connecting != null) return;
     if (wasBg != null &&
         DateTime.now().difference(wasBg) >
             config.backgroundReconnectThreshold) {
@@ -492,6 +536,17 @@ class TicTacModule {
   }
 
   Future<void> _smartReconnect() async {
+    // If a connect is in flight, don't tear it down — just wait for it.
+    // Killing the in-flight Tinode here is what produced the ~55s startup
+    // stall: the SDK kept awaiting a socket that had been closed under it.
+    final inflight = _connecting;
+    if (inflight != null) {
+      try {
+        await inflight;
+      } catch (_) {}
+      return;
+    }
+
     _intentionalDisconnect = false;
     _stopHeartbeat();
     _connectionState.add(TicTacConnectionState.reconnecting);
@@ -739,6 +794,17 @@ class _ActiveTopic {
     handle = _TopicHandleImpl(this);
   }
 
+  /// Re-fire onMessageReceived for every message currently in the SDK's
+  /// local cache. Used when a UI rejoins an already-active topic so it
+  /// can populate without hitting the network. Listeners are expected to
+  /// dedupe by message id (TicTacChat already does this).
+  void replayCachedMessages() {
+    if (_disposed) return;
+    for (final data in _topic.messages) {
+      _onData(data);
+    }
+  }
+
   void attach() {
     _dataSub?.cancel();
     _dataSub = _topic.onData.listen(_onData);
@@ -763,7 +829,14 @@ class _ActiveTopic {
     if (data == null) return;
     final from = data.from;
     if (from == null) return;
+    final seq = data.seq;
+    module._log('topic($topicId): _onData seq=$seq from=$from — resolving');
+    final t0 = DateTime.now();
     module.config.resolveAppUserId(from).then((appUserId) {
+      module._log(
+        'topic($topicId): _onData seq=$seq resolved to $appUserId '
+        'in ${DateTime.now().difference(t0).inMilliseconds}ms',
+      );
       if (appUserId == null) return;
       final author = types.User(id: appUserId);
       final msgId = data.seq?.toString() ?? '';
@@ -919,10 +992,30 @@ class _ActiveTopic {
   }
 
   Future<void> leave() async {
-    final tinodeRef = _topic;
+    // Idempotent: TicTacChat owns the topic's lifecycle and calls leave
+    // from its dispose, while host code (the bridge) may also call leave
+    // from its own dispose path. Without this guard, the second call
+    // re-fires Topic.leave on an already-left subscription, surfacing
+    // "Cannot publish on inactive topic" exceptions.
+    if (_disposed) return;
     await dispose();
     module._activeTopics.remove(topicId);
-    await tinodeRef.leave(false);
+    // Topic.leave does two things we need: (a) sends LEAVE on the
+    // wire, (b) calls resetSubscription() to clear the local
+    // `_subscribed` flag so the next join re-issues a SUB and re-fetches
+    // cached messages. Routing through Tinode.leave directly skips (b),
+    // which means a subsequent joinTopic sees `isSubscribed=true` and
+    // silently skips the SUB → no message replay.
+    //
+    // Topic.leave throws a `'CtrlMessage' is not a subtype of
+    // 'Map<String, dynamic>'` cast error AFTER both (a) and (b) have
+    // completed (the cast is on the return value). Swallow it so the
+    // caller doesn't see a phantom failure.
+    try {
+      await _topic.leave(false);
+    } catch (e) {
+      module._log('Topic.leave swallowed cast: $e');
+    }
   }
 }
 

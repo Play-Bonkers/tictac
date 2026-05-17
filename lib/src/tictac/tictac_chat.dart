@@ -267,10 +267,6 @@ class _TicTacChatState extends State<TicTacChat> {
 
   Future<void> _joinTopic() async {
     _topic = await widget.module.joinTopic(widget.topicId);
-    if (_disposed) {
-      _topic?.leave();
-      _topic = null;
-    }
   }
 
   @override
@@ -282,7 +278,13 @@ class _TicTacChatState extends State<TicTacChat> {
     }
     _typingTimers.clear();
     widget.module.removeCallbacks(_ownCallbacks);
-    _topic?.leave();
+    // Intentionally do NOT call _topic.leave() here. Topic lifecycle is
+    // owned by the host (the bridge / app shell) — leaving on every
+    // screen close churns the server with sub/leave/sub cycles that
+    // either confuse the SDK or trip server-side abuse detection, and
+    // makes re-entry slow because we re-subscribe each time. Keeping the
+    // subscription alive means joinTopic on re-mount is a cache hit and
+    // the chat repopulates instantly from tinode's local message cache.
     // _inputController is owned by flutter_chat_ui's Input — do not dispose
     super.dispose();
   }

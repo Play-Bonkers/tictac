@@ -49,6 +49,11 @@ class TicTacConfig {
   /// Random jitter factor applied to reconnect delays (0.0 - 1.0)
   final double jitterFactor;
 
+  /// Hard timeout on the underlying Tinode websocket connect. The SDK
+  /// can otherwise sit waiting on a dead socket for ~55s before declaring
+  /// failure; this caps that so reconnect logic kicks in promptly.
+  final Duration connectTimeout;
+
   /// Heartbeat interval for detecting dead connections (default: 12s)
   final Duration heartbeatInterval;
 
@@ -125,6 +130,7 @@ class TicTacConfig {
     this.coverInterval = const Duration(seconds: 30),
     this.maxReconnectDuration = const Duration(minutes: 7),
     this.jitterFactor = 0.3,
+    this.connectTimeout = const Duration(seconds: 10),
     this.heartbeatInterval = const Duration(seconds: 12),
     this.pongTimeout = const Duration(seconds: 5),
     this.backgroundReconnectThreshold = const Duration(seconds: 30),
