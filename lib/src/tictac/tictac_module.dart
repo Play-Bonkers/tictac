@@ -233,6 +233,14 @@ class TicTacModule {
       _connectionState.add(TicTacConnectionState.connected);
       _startHeartbeat();
 
+      // Re-subscribe any topics that were active before a reconnect.
+      // This MUST happen before firing onConnected — callers commonly
+      // re-join their active topic immediately on receiving the event
+      // and would otherwise get a stale handle whose underlying tinode
+      // Topic still belongs to the previous (now disposed) socket.
+      // No-op on the first connect when _activeTopics is empty.
+      await _reattachActiveTopics();
+
       _fire((c) => c.onConnected?.call(topics));
     } catch (e) {
       _log('Connection failed: $e');
@@ -559,8 +567,11 @@ class TicTacModule {
       _tinode?.disconnect();
       _tinode = null;
 
+      // connect() itself runs _reattachActiveTopics before firing
+      // onConnected, so the topic list a listener receives points at
+      // a freshly-resubscribed handle — no separate reattach call
+      // needed here.
       await connect();
-      await _reattachActiveTopics();
     } catch (e) {
       _log('Reconnection failed: $e');
     }
