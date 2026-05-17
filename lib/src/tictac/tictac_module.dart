@@ -3,45 +3,66 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/widgets.dart' show AppLifecycleState;
+import 'package:flutter_chat_types/flutter_chat_types.dart' as types;
 import 'package:rxdart/rxdart.dart';
 import 'package:tictac/tinode.dart' as tinode;
 import 'package:tictac/src/models/rest-auth-secret.dart';
+import 'package:tictac/src/tictac/tictac_callbacks.dart';
 import 'package:tictac/src/tictac/tictac_config.dart';
 import 'package:tictac/src/tictac/connection_state.dart';
 import 'package:tictac/src/tictac/models/topic.dart' as tictac_models;
 import 'package:tictac/src/tictac/models/topic_type.dart';
 import 'package:tictac/src/tictac/models/message_preview.dart';
-import 'package:tictac/src/tictac/identity/identity_resolver.dart';
-import 'package:tictac/src/tictac/identity/cached_identity_resolver.dart';
-import 'package:tictac/src/tictac/identity/tags_identity_resolver.dart';
-import 'package:tictac/src/tictac/topic_controller.dart';
+import 'package:tictac/src/tictac/topic_handle.dart';
+import 'package:tictac/src/tictac/voice/voice_callbacks.dart';
 import 'package:tictac/src/tictac/voice/voice_module.dart';
+import 'package:tictac/src/tictac/voice/voice_session.dart';
 
-/// Main entry point for TicTac chat functionality.
+/// Entry point for TicTac.
 ///
-/// Wraps the Tinode SDK and exposes a clean API that matches the
-/// CxsChatModule pattern. No Tinode types are exposed.
+/// Stateless on the chat side: every event surfaces through
+/// [TicTacCallbacks]. The module owns the Tinode socket and routes
+/// events; it does NOT remember messages, members, presence, or typing
+/// state. The caller (or `TicTacChat`) maintains whatever it wants to
+/// display.
+///
+/// The one piece of state the module does keep is the set of currently-
+/// subscribed topic ids — needed to compute add/remove deltas against
+/// Tinode's "here is the full sub list" event. Nothing else.
 class TicTacModule {
   final TicTacConfig config;
 
-  // ---------------------------------------------------------------------------
-  // Consumer callbacks
-  // ---------------------------------------------------------------------------
+  // Multi-listener fan-out: every event iterates the live list and
+  // invokes the relevant callback on each registered bag. Callers add /
+  // remove their bag at the right lifecycle moment. The first one is
+  // an optional bag the module's constructor takes for convenience —
+  // typical app code passes its "host" callbacks here and lets
+  // `TicTacChat` (or any other widget) `addCallbacks` for its own use.
+  final List<TicTacCallbacks> _listeners = [];
 
-  void Function(List<tictac_models.Topic> topics)? onConnected;
-  void Function(String reason)? onDisconnected;
-  void Function(tictac_models.Topic topic)? onTopicAdded;
-  void Function(String topicId, String reason)? onTopicRemoved;
-  void Function(tictac_models.Topic topic)? onTopicUpdated;
-  void Function(String userId, bool isOnline)? onPresenceChanged;
-  void Function(String topicId)? onMessageReceived;
-  String? Function(String tinodeUserId, String topicId)? onUnresolvedMessageAuthor;
-  String? Function(String tinodeUserId, String topicId)? onUnresolvedMember;
-  String? Function(String tinodeUserId, bool isOnline)? onUnresolvedPresence;
-  String? Function(String tinodeUserId, String topicId)? onUnresolvedTyping;
+  /// Register an additional callbacks bag. Returns the same bag for
+  /// chaining. Idempotent — adding the same instance twice is a no-op.
+  TicTacCallbacks addCallbacks(TicTacCallbacks callbacks) {
+    if (!_listeners.contains(callbacks)) _listeners.add(callbacks);
+    return callbacks;
+  }
+
+  /// Remove a previously-added callbacks bag. No-op if the bag was
+  /// never registered.
+  void removeCallbacks(TicTacCallbacks callbacks) {
+    _listeners.remove(callbacks);
+  }
+
+  void _fire(void Function(TicTacCallbacks c) f) {
+    // Copy to a local so a listener that triggers add/remove during a
+    // fire doesn't mutate the iterator we're walking.
+    for (final c in List<TicTacCallbacks>.of(_listeners)) {
+      f(c);
+    }
+  }
 
   // ---------------------------------------------------------------------------
-  // Internal state
+  // Internal state — kept small; nothing here is exposed to callers.
   // ---------------------------------------------------------------------------
 
   tinode.Tinode? _tinode;
@@ -52,27 +73,31 @@ class TicTacModule {
   DateTime? _firstFailureTime;
   final _random = Random();
 
-  final Map<String, bool> _presenceMap = {};
-  final Map<String, TopicController> _topicControllers = {};
-  final Map<String, String> _topicNames = {}; // topicId -> display name
-  late IdentityResolver identityResolver;
+  // Coalesce concurrent connect() calls. Multiple paths can race the
+  // first connect (host bridge calling connect() at app start AND the
+  // lifecycle observer firing _onAppResumed → _smartReconnect →
+  // connect() before the first one completes). Without this guard, both
+  // callers reassign _tinode and its stream subscriptions; the
+  // heartbeat ends up listening on one Tinode while probing another and
+  // never declares-dead. The actual symptom: ~50s of silence after a
+  // dropped socket before the SDK itself eventually times out.
+  Future<void>? _connecting;
 
-  VoiceModule? _voice;
+  // Diff source: previous topic-id set, used to fire add/remove/update
+  // when Tinode dumps the full sub list.
+  final Set<String> _knownTopicIds = {};
 
-  /// Voice (LiveKit) entry point. Lazily constructed on first access.
-  /// Requires [TicTacConfig.tagsBaseUrl] and [TicTacConfig.getFirebaseIdToken]
-  /// to be set; without those, [VoiceModule.joinVoice] will throw.
-  VoiceModule get voice {
-    return _voice ??= VoiceModule(
-      config: config,
-      identityResolver: identityResolver,
-    );
-  }
+  // Per-joined-topic subscriptions. Owns the StreamSubscriptions opened
+  // against tinode.Topic streams; tearing this down on leave() detaches
+  // event delivery for that topic.
+  final Map<String, _ActiveTopic> _activeTopics = {};
 
-  // Connection state
+  VoiceModule? _voiceFactory;
+
+  // Connection state (still a Stream for backwards-compatible inspection
+  // from inside the module; not part of the public API).
   final BehaviorSubject<TicTacConnectionState> _connectionState =
       BehaviorSubject.seeded(TicTacConnectionState.disconnected);
-  Stream<TicTacConnectionState> get connectionState => _connectionState.stream;
   TicTacConnectionState get currentConnectionState => _connectionState.value;
 
   // Heartbeat
@@ -88,50 +113,19 @@ class TicTacModule {
   StreamSubscription? _onPressSub;
   StreamSubscription? _onSubsUpdatedSub;
 
-  TicTacModule(
-    this.config, {
-    this.onConnected,
-    this.onDisconnected,
-    this.onTopicAdded,
-    this.onTopicRemoved,
-    this.onTopicUpdated,
-    this.onPresenceChanged,
-    this.onMessageReceived,
-    this.onUnresolvedMessageAuthor,
-    this.onUnresolvedMember,
-    this.onUnresolvedPresence,
-    this.onUnresolvedTyping,
-    IdentityResolver? identityResolver,
-  }) {
-    if (identityResolver != null) {
-      this.identityResolver = identityResolver;
-    } else if (config.tagsBaseUrl != null && config.tagsBaseUrl!.isNotEmpty) {
-      this.identityResolver = TagsIdentityResolver(
-        tagsBaseUrl: config.tagsBaseUrl!,
-        appId: config.appId,
-        appKey: config.appKey,
-      );
-    } else {
-      this.identityResolver = CachedIdentityResolver();
-    }
+  TicTacModule(this.config, [TicTacCallbacks? initialCallbacks]) {
+    if (initialCallbacks != null) _listeners.add(initialCallbacks);
   }
 
-  /// Check if a user is online.
-  bool isOnline(String appUserId) => _presenceMap[appUserId] ?? false;
-
-  /// Whether we're currently connected and authenticated.
   bool get isConnected => _tinode?.isConnected ?? false;
 
   /// Returns a copy of the current user's `me.public` map, or null if not
-  /// connected. The auth-lambda provisioner writes `appUserId` into this
-  /// during account creation; integration tests inspect it to verify the
-  /// provisioner's behavior end-to-end.
+  /// connected. Read-only — the provisioner Lambda writes `appUserId`
+  /// into this during account creation.
   Map<String, dynamic>? getSelfPublic() {
     final me = _tinode?.getMeTopic();
     final pub = me?.public;
-    if (pub is Map) {
-      return Map<String, dynamic>.from(pub);
-    }
+    if (pub is Map) return Map<String, dynamic>.from(pub);
     return null;
   }
 
@@ -139,13 +133,23 @@ class TicTacModule {
   // Connection lifecycle
   // ---------------------------------------------------------------------------
 
-  /// Connect to Tinode, authenticate, and return the user's topic list.
-  Future<List<tictac_models.Topic>> connect() async {
+  /// Connect, authenticate, and fire `onConnected(topics)`. Idempotent
+  /// reconnects re-fire `onConnected` with a fresh topic list.
+  Future<void> connect() {
+    final inflight = _connecting;
+    if (inflight != null) return inflight;
+    final future = _doConnect();
+    _connecting = future;
+    return future.whenComplete(() {
+      if (identical(_connecting, future)) _connecting = null;
+    });
+  }
+
+  Future<void> _doConnect() async {
     _intentionalDisconnect = false;
     _connectionState.add(TicTacConnectionState.connecting);
 
     try {
-      // Build upgrade headers with app credentials and optional auth token
       final upgradeHeaders = <String, String>{
         'x-app-id': config.appId,
         'x-app-key': config.appKey,
@@ -166,37 +170,39 @@ class TicTacModule {
         false,
       );
 
-      // Listen for disconnects
       _onDisconnectSub?.cancel();
       _onDisconnectSub = _tinode!.onDisconnect.listen((_) {
         if (_intentionalDisconnect) return;
         _log('Disconnected unexpectedly');
-        onDisconnected?.call('Connection lost');
+        _fire((c) => c.onDisconnected?.call('Connection lost'));
         _scheduleReconnect();
       });
 
-      await _tinode!.connect();
+      await _tinode!.connect().timeout(
+        config.connectTimeout,
+        onTimeout: () {
+          // Force the SDK socket closed so subsequent reconnect attempts
+          // don't reuse a half-open Tinode instance.
+          _tinode?.disconnect();
+          throw TimeoutException(
+            'Tinode connect did not complete within ${config.connectTimeout.inSeconds}s',
+          );
+        },
+      );
       _log('Connected to ${config.wsHostPort}');
 
-      // Authenticate
       await _authenticate();
       _log('Authenticated as ${_tinode!.userId}');
 
-      // Seed identity resolver with current user
-      identityResolver.addMapping(config.appUserId, _tinode!.userId);
-
-      // Subscribe to "me" topic to get contact list and presence
       final me = _tinode!.getMeTopic();
 
-      // Listen for presence changes
       _onPressSub?.cancel();
-      _onPressSub = me.onPres.listen(_handlePresence);
+      _onPressSub = me.onPres.listen(_handleMePresence);
 
-      // Listen for subscription updates (topic list changes)
       _onSubsUpdatedSub?.cancel();
       _onSubsUpdatedSub = me.onSubsUpdated.listen(_handleSubsUpdated);
 
-      // Wait for subscription data to arrive from server
+      // Wait for subscription data to arrive from server.
       final subsReady = Completer<void>();
       late StreamSubscription subsSub;
       subsSub = me.onSubsUpdated.listen((_) {
@@ -204,27 +210,22 @@ class TicTacModule {
         subsSub.cancel();
       });
 
-      // withDesc fetches the user's own me.public/private from the server
-      // (display name, avatar, the appUserId set by the auth-lambda
-      // provisioner). withLaterSub fetches contact-list deltas. Without
-      // withDesc, me.public stays null even though the server has it.
       await me.subscribe(
         tinode.MetaGetBuilder(me).withDesc(null).withLaterSub(null).build(),
         null,
       );
 
-      // Wait for subs data or timeout (new users may have no contacts)
       await subsReady.future.timeout(
         const Duration(seconds: 3),
-        onTimeout: () {
-          subsSub.cancel();
-        },
+        onTimeout: () => subsSub.cancel(),
       );
 
-      // Build topic list from fresh server data
       final topics = await _buildTopicList(me);
+      _knownTopicIds
+        ..clear()
+        ..addAll(topics.map((t) => t.id));
 
-      // Reset reconnect state on success
+      // Reset reconnect state on success.
       _reconnectAttempts = 0;
       _isReconnecting = false;
       _firstFailureTime = null;
@@ -232,18 +233,16 @@ class TicTacModule {
       _connectionState.add(TicTacConnectionState.connected);
       _startHeartbeat();
 
-      onConnected?.call(topics);
-      return topics;
+      _fire((c) => c.onConnected?.call(topics));
     } catch (e) {
       _log('Connection failed: $e');
       _connectionState.add(TicTacConnectionState.disconnected);
-      onDisconnected?.call('Connection failed: $e');
+      _fire((c) => c.onDisconnected?.call('Connection failed: $e'));
       _scheduleReconnect();
       rethrow;
     }
   }
 
-  /// Disconnect from Tinode.
   Future<void> disconnect() async {
     _intentionalDisconnect = true;
     _stopHeartbeat();
@@ -251,14 +250,16 @@ class TicTacModule {
     _onPressSub?.cancel();
     _onSubsUpdatedSub?.cancel();
     _onNetworkProbeSub?.cancel();
+    for (final t in _activeTopics.values) {
+      await t.dispose();
+    }
+    _activeTopics.clear();
+    _knownTopicIds.clear();
     _tinode?.disconnect();
     _tinode = null;
-    _presenceMap.clear();
-    _topicNames.clear();
     _connectionState.add(TicTacConnectionState.disconnected);
   }
 
-  /// Force a reconnection (resets backoff state).
   void reconnect() {
     _reconnectAttempts = 0;
     _isReconnecting = false;
@@ -272,68 +273,160 @@ class TicTacModule {
   }
 
   // ---------------------------------------------------------------------------
-  // Heartbeat
+  // Topic operations
   // ---------------------------------------------------------------------------
 
-  void _startHeartbeat() {
-    _stopHeartbeat();
-    _awaitingPong = false;
+  /// Force-refresh the topic list from the server. Fires
+  /// `onTopicAdded` / `onTopicRemoved` / `onTopicUpdated` as deltas
+  /// against the previously-seen set.
+  Future<List<tictac_models.Topic>> refreshTopics() async {
+    await _ensureConnected();
+    final me = _tinode!.getMeTopic();
+    me.clearContacts();
 
-    // Subscribe to pong responses
-    _onNetworkProbeSub?.cancel();
-    _onNetworkProbeSub = _tinode?.onNetworkProbe.listen((_) {
-      _awaitingPong = false;
-      _pongTimer?.cancel();
+    final completer = Completer<void>();
+    late StreamSubscription sub;
+    sub = me.onSubsUpdated.listen((_) {
+      if (!completer.isCompleted) completer.complete();
+      sub.cancel();
     });
 
-    _heartbeatTimer = Timer.periodic(config.heartbeatInterval, (_) {
-      _sendHeartbeat();
-    });
+    _tinode!.getMeta('me', tinode.GetQuery.fromMessage({'what': 'sub'}));
+
+    await completer.future.timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => sub.cancel(),
+    );
+    return _buildTopicList(me);
   }
 
-  void _stopHeartbeat() {
-    _heartbeatTimer?.cancel();
-    _heartbeatTimer = null;
-    _pongTimer?.cancel();
-    _pongTimer = null;
-    _awaitingPong = false;
+  /// Create a group topic with the given display name + initial members.
+  Future<tictac_models.Topic> createGroupTopic(
+    String name,
+    List<String> memberAppUserIds,
+  ) async {
+    await _ensureConnected();
+    final tinodeUserIds = <String>[];
+    for (final appUserId in memberAppUserIds) {
+      // Reverse: we have appUserId, want tinodeUid. The host's resolver
+      // goes the other way; for group creation we have to ask Tinode via
+      // a fnd lookup. Punt for now — this code path isn't covered by the
+      // host's resolver contract. Document as a known gap.
+      tinodeUserIds.add(appUserId);
+    }
+    final newTopic = _tinode!.newTopic();
+    final setParams = tinode.SetParams()
+      ..desc = (tinode.TopicDescription()..public = {'fn': name});
+    await newTopic.subscribe(
+      tinode.MetaGetBuilder(newTopic).build(),
+      setParams,
+    );
+    for (final userId in tinodeUserIds) {
+      try {
+        await newTopic.invite(userId, 'JRWPS');
+      } catch (e) {
+        _log('Failed to invite $userId: $e');
+      }
+    }
+    return tictac_models.Topic(
+      id: newTopic.name!,
+      name: name,
+      type: TopicType.group,
+      memberAppUserIds: memberAppUserIds,
+    );
   }
 
-  void _sendHeartbeat() {
-    if (_tinode == null || !_tinode!.isConnected) {
-      _declareDead('Socket not connected');
-      return;
-    }
-
-    if (_awaitingPong) {
-      _declareDead('Previous pong never arrived');
-      return;
-    }
-
-    try {
-      _tinode!.networkProbe();
-      _awaitingPong = true;
-      _pongTimer = Timer(config.pongTimeout, () {
-        _declareDead('Pong timeout');
-      });
-    } catch (e) {
-      _declareDead('Probe send failed: $e');
-    }
+  /// Create a direct (P2P) topic with another user by tinode user id.
+  /// Returns the new topic; the caller can `joinTopic` it for events.
+  Future<tictac_models.Topic> createDirectTopic(
+      String otherTinodeUserId) async {
+    await _ensureConnected();
+    final p2pTopic = _tinode!.newTopicWith(otherTinodeUserId);
+    await p2pTopic.subscribe(
+      tinode.MetaGetBuilder(p2pTopic).build(),
+      null,
+    );
+    final otherAppUserId =
+        await config.resolveAppUserId(otherTinodeUserId);
+    return tictac_models.Topic(
+      id: p2pTopic.name!,
+      name: otherAppUserId ?? otherTinodeUserId,
+      type: TopicType.direct,
+      memberAppUserIds:
+          otherAppUserId != null ? [otherAppUserId] : const [],
+    );
   }
 
-  void _declareDead(String reason) {
-    _stopHeartbeat();
-    _log('Heartbeat: $reason — declaring connection dead');
-    onDisconnected?.call('Heartbeat timeout');
-    _scheduleReconnect();
+  /// Join a topic. Wires up event listeners and emits cached messages,
+  /// members, and presence through the callback bag. Returns a
+  /// methods-only handle for sending / leaving / etc.
+  ///
+  /// Re-joining a still-active topic is a cache hit: returns the same
+  /// handle and replays the SDK's locally-cached messages through
+  /// onMessageReceived so a re-mounted UI populates without hitting the
+  /// network.
+  Future<TopicHandle> joinTopic(String topicId) async {
+    await _ensureConnected();
+    final existing = _activeTopics[topicId];
+    if (existing != null) {
+      // Defer to the next microtask so the caller has a chance to
+      // register its callbacks (most callers do addCallbacks → joinTopic
+      // back to back) before we start firing onMessageReceived.
+      scheduleMicrotask(() => existing.replayCachedMessages());
+      return existing.handle;
+    }
+
+    final topic = _tinode!.getTopic(topicId);
+    if (!topic.isSubscribed) {
+      tinode.MetaGetBuilder builder;
+      try {
+        builder = tinode.MetaGetBuilder(topic)
+            .withLaterData(config.recentMessages)
+            .withLaterSub(null);
+      } on Error {
+        builder = tinode.MetaGetBuilder(topic)
+            .withData(null, null, config.recentMessages)
+            .withSub(null, null, null);
+      }
+      await topic.subscribe(builder.build(), null);
+    }
+
+    final active = _ActiveTopic(
+      topicId: topicId,
+      topic: topic,
+      module: this,
+    );
+    active.attach();
+    _activeTopics[topicId] = active;
+    return active.handle;
+  }
+
+  Future<void> deleteTopic(String topicId, {bool hard = false}) async {
+    await _ensureConnected();
+    await _tinode!.deleteTopic(topicId, hard);
+    final active = _activeTopics.remove(topicId);
+    await active?.dispose();
   }
 
   // ---------------------------------------------------------------------------
-  // App lifecycle
+  // Voice
   // ---------------------------------------------------------------------------
 
-  /// Call this from the consuming app when app lifecycle state changes.
-  /// Enables automatic reconnection after backgrounding.
+  /// Mint a LiveKit JWT for [topicId] and join the corresponding voice
+  /// room. The returned session fires events via [voiceCallbacks].
+  Future<VoiceSession> joinVoice(
+    String topicId, {
+    required VoiceCallbacks voiceCallbacks,
+  }) async {
+    await _ensureConnected();
+    _voiceFactory ??= VoiceModule(config: config);
+    return _voiceFactory!.joinVoice(topicId, voiceCallbacks);
+  }
+
+  // ---------------------------------------------------------------------------
+  // App lifecycle (caller routes Flutter app lifecycle here)
+  // ---------------------------------------------------------------------------
+
   void handleAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
@@ -351,17 +444,18 @@ class TicTacModule {
   void _onAppResumed() {
     final wasBg = _backgroundedAt;
     _backgroundedAt = null;
-
     if (_intentionalDisconnect) return;
-
+    // A connect is already in flight (most commonly: the host called
+    // connect() at app boot, then Flutter fired resumed during the same
+    // first frame). Don't trampoline — let the in-flight attempt finish.
+    if (_connecting != null) return;
     if (wasBg != null &&
-        DateTime.now().difference(wasBg) > config.backgroundReconnectThreshold) {
+        DateTime.now().difference(wasBg) >
+            config.backgroundReconnectThreshold) {
       _log('Resumed after long background — forcing reconnect');
       _smartReconnect();
       return;
     }
-
-    // Quick health check then resume heartbeat
     if (_tinode == null || !_tinode!.isConnected) {
       _log('Resumed but socket is dead — reconnecting');
       _smartReconnect();
@@ -371,23 +465,69 @@ class TicTacModule {
   }
 
   // ---------------------------------------------------------------------------
-  // Pre-operation health check
+  // Heartbeat
+  // ---------------------------------------------------------------------------
+
+  void _startHeartbeat() {
+    _stopHeartbeat();
+    _awaitingPong = false;
+    _onNetworkProbeSub?.cancel();
+    _onNetworkProbeSub = _tinode?.onNetworkProbe.listen((_) {
+      _awaitingPong = false;
+      _pongTimer?.cancel();
+    });
+    _heartbeatTimer =
+        Timer.periodic(config.heartbeatInterval, (_) => _sendHeartbeat());
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _pongTimer?.cancel();
+    _pongTimer = null;
+    _awaitingPong = false;
+  }
+
+  void _sendHeartbeat() {
+    if (_tinode == null || !_tinode!.isConnected) {
+      _declareDead('Socket not connected');
+      return;
+    }
+    if (_awaitingPong) {
+      _declareDead('Previous pong never arrived');
+      return;
+    }
+    try {
+      _tinode!.networkProbe();
+      _awaitingPong = true;
+      _pongTimer =
+          Timer(config.pongTimeout, () => _declareDead('Pong timeout'));
+    } catch (e) {
+      _declareDead('Probe send failed: $e');
+    }
+  }
+
+  void _declareDead(String reason) {
+    _stopHeartbeat();
+    _log('Heartbeat: $reason — declaring connection dead');
+    _fire((c) => c.onDisconnected?.call('Heartbeat timeout'));
+    _scheduleReconnect();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reconnect
   // ---------------------------------------------------------------------------
 
   Future<void> _ensureConnected() async {
     if (_tinode != null && _tinode!.isConnected) return;
-
     final state = _connectionState.value;
     if (state == TicTacConnectionState.connecting ||
         state == TicTacConnectionState.reconnecting) {
-      _log('Waiting for connection to establish...');
       await _connectionState.stream
           .firstWhere((s) => s == TicTacConnectionState.connected)
           .timeout(const Duration(seconds: 15));
       return;
     }
-
-    _log('Pre-operation health check failed — reconnecting');
     final future = _connectionState.stream
         .firstWhere((s) => s == TicTacConnectionState.connected)
         .timeout(const Duration(seconds: 15));
@@ -395,19 +535,44 @@ class TicTacModule {
     await future;
   }
 
-  // ---------------------------------------------------------------------------
-  // TopicController re-attachment after reconnect
-  // ---------------------------------------------------------------------------
+  Future<void> _smartReconnect() async {
+    // If a connect is in flight, don't tear it down — just wait for it.
+    // Killing the in-flight Tinode here is what produced the ~55s startup
+    // stall: the SDK kept awaiting a socket that had been closed under it.
+    final inflight = _connecting;
+    if (inflight != null) {
+      try {
+        await inflight;
+      } catch (_) {}
+      return;
+    }
 
-  Future<void> _reattachTopicControllers() async {
-    final entries = Map.of(_topicControllers);
+    _intentionalDisconnect = false;
+    _stopHeartbeat();
+    _connectionState.add(TicTacConnectionState.reconnecting);
+
+    try {
+      _onDisconnectSub?.cancel();
+      _onPressSub?.cancel();
+      _onSubsUpdatedSub?.cancel();
+      _onNetworkProbeSub?.cancel();
+      _tinode?.disconnect();
+      _tinode = null;
+
+      await connect();
+      await _reattachActiveTopics();
+    } catch (e) {
+      _log('Reconnection failed: $e');
+    }
+  }
+
+  Future<void> _reattachActiveTopics() async {
+    final entries = Map.of(_activeTopics);
     for (final entry in entries.entries) {
       final topicId = entry.key;
-      final controller = entry.value;
-
+      final active = entry.value;
       try {
         final topic = _tinode!.getTopic(topicId);
-
         if (!topic.isSubscribed) {
           tinode.MetaGetBuilder builder;
           try {
@@ -421,249 +586,10 @@ class TicTacModule {
           }
           await topic.subscribe(builder.build(), null);
         }
-
-        controller.attachToTopic(topic);
-        controller.setConnected(true);
-        _log('Reattached topic $topicId');
+        active.reattach(topic);
       } catch (e) {
         _log('Failed to reattach topic $topicId: $e');
-        controller.setConnected(false);
       }
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Authentication
-  // ---------------------------------------------------------------------------
-
-  Future<void> _authenticate() async {
-    // Fast path: try cached token
-    if (_cachedToken != null &&
-        _cachedToken!.token.isNotEmpty &&
-        _cachedToken!.expires.isAfter(DateTime.now())) {
-      try {
-        await _tinode!.loginToken(_cachedToken!.token, {});
-        return;
-      } catch (_) {
-        _log('Token login failed, falling back to REST auth');
-        _cachedToken = null;
-      }
-    }
-
-    // Full path: REST auth with protobuf secret
-    final secret = RestAuthSecret(
-      appUserId: config.appUserId,
-      appId: config.appId,
-      appKey: config.appKey,
-      provision: config.provision,
-    );
-    final encodedSecret = base64.encode(secret.toBytes());
-
-    await _tinode!.login('rest', encodedSecret, null);
-    _cachedToken = _tinode!.getAuthenticationToken();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Topic operations
-  // ---------------------------------------------------------------------------
-
-  /// Get the current list of topics from the server.
-  /// Always fetches fresh data — never reads from cache.
-  Future<List<tictac_models.Topic>> getTopics() async {
-    await _ensureConnected();
-
-    final me = _tinode!.getMeTopic();
-
-    // Clear stale contacts before fetching fresh data
-    me.clearContacts();
-
-    // Wait for fresh subscription data from the server
-    final completer = Completer<void>();
-    late StreamSubscription sub;
-    sub = me.onSubsUpdated.listen((_) {
-      if (!completer.isCompleted) completer.complete();
-      sub.cancel();
-    });
-
-    // Request fresh subscriptions
-    _tinode!.getMeta(
-      'me',
-      tinode.GetQuery.fromMessage({'what': 'sub'}),
-    );
-
-    // Wait for response or timeout
-    await completer.future.timeout(
-      const Duration(seconds: 5),
-      onTimeout: () {
-        sub.cancel();
-      },
-    );
-
-    return _buildTopicList(me);
-  }
-
-  /// Create a group topic with the given name and members.
-  Future<tictac_models.Topic> createGroupTopic(
-    String name,
-    List<String> memberAppUserIds,
-  ) async {
-    await _ensureConnected();
-
-    // Resolve app user IDs to tinode user IDs for invites
-    final tinodeUserIds = <String>[];
-    for (final appUserId in memberAppUserIds) {
-      final tinodeId = await identityResolver.lookup(appUserId);
-      if (tinodeId != null) {
-        tinodeUserIds.add(tinodeId);
-      }
-    }
-
-    final newTopic = _tinode!.newTopic();
-    final setParams = tinode.SetParams();
-    setParams.desc = tinode.TopicDescription();
-    setParams.desc!.public = {'fn': name};
-
-    await newTopic.subscribe(
-      tinode.MetaGetBuilder(newTopic).build(),
-      setParams,
-    );
-
-    // Invite members
-    for (final userId in tinodeUserIds) {
-      try {
-        await newTopic.invite(userId, 'JRWPS');
-      } catch (e) {
-        _log('Failed to invite $userId: $e');
-      }
-    }
-
-    final topicId = newTopic.name!;
-    _topicNames[topicId] = name;
-
-    return tictac_models.Topic(
-      id: topicId,
-      name: name,
-      type: TopicType.group,
-      memberAppUserIds: memberAppUserIds,
-    );
-  }
-
-  /// Create a direct (P2P) topic with another user.
-  Future<tictac_models.Topic> createDirectTopic(String otherAppUserId) async {
-    await _ensureConnected();
-
-    final otherTinodeId = await identityResolver.lookup(otherAppUserId);
-    if (otherTinodeId == null) {
-      throw Exception('Cannot resolve user ID: $otherAppUserId');
-    }
-
-    print(
-      'TicTac: createDirectTopic appUser=$otherAppUserId tinodeId=$otherTinodeId — subscribing',
-    );
-
-    final p2pTopic = _tinode!.newTopicWith(otherTinodeId);
-    await p2pTopic.subscribe(
-      tinode.MetaGetBuilder(p2pTopic).build(),
-      null,
-    );
-
-    final topicId = p2pTopic.name!;
-    _topicNames[topicId] = otherAppUserId;
-
-    return tictac_models.Topic(
-      id: topicId,
-      name: otherAppUserId,
-      type: TopicType.direct,
-      memberAppUserIds: [otherAppUserId],
-    );
-  }
-
-  /// Join a topic and return a TopicController for interacting with it.
-  Future<TopicController> joinTopic(String topicId) async {
-    await _ensureConnected();
-
-    // Return existing controller if already joined
-    if (_topicControllers.containsKey(topicId)) {
-      return _topicControllers[topicId]!;
-    }
-
-    final topic = _tinode!.getTopic(topicId);
-
-    if (!topic.isSubscribed) {
-      // Use withLaterSub for previously-subscribed topics (has cached desc),
-      // fall back to withSub for new topics where _lastDescUpdate is uninitialized
-      tinode.MetaGetBuilder builder;
-      try {
-        builder = tinode.MetaGetBuilder(topic)
-            .withLaterData(config.recentMessages)
-            .withLaterSub(null);
-      } on Error {
-        builder = tinode.MetaGetBuilder(topic)
-            .withData(null, null, config.recentMessages)
-            .withSub(null, null, null);
-      }
-      await topic.subscribe(builder.build(), null);
-    }
-
-    final controller = TopicController(
-      topicId: topicId,
-      userId: config.appUserId,
-      identityResolver: identityResolver,
-      onUnresolvedMessageAuthor: onUnresolvedMessageAuthor,
-      onUnresolvedMember: onUnresolvedMember,
-      onUnresolvedPresence: onUnresolvedPresence,
-      onUnresolvedTyping: onUnresolvedTyping,
-      onSelfPublicMissing: _setSelfPublicAppUserId,
-    );
-    controller.attachToTopic(topic);
-    _topicControllers[topicId] = controller;
-    return controller;
-  }
-
-  /// Delete a topic.
-  Future<void> deleteTopic(String topicId, {bool hard = false}) async {
-    await _ensureConnected();
-    await _tinode!.deleteTopic(topicId, hard);
-    final controller = _topicControllers.remove(topicId);
-    controller?.dispose();
-  }
-
-  /// Leave a topic (detach without deleting).
-  Future<void> leaveTopic(String topicId) async {
-    await _ensureConnected();
-    await _tinode!.leave(topicId, false);
-    final controller = _topicControllers.remove(topicId);
-    controller?.dispose();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Reconnection (two-phase with wall-clock limit)
-  // ---------------------------------------------------------------------------
-
-  Future<void> _smartReconnect() async {
-    _intentionalDisconnect = false;
-    _stopHeartbeat();
-    _connectionState.add(TicTacConnectionState.reconnecting);
-
-    // Notify all controllers they're disconnected
-    for (final controller in _topicControllers.values) {
-      controller.setConnected(false);
-    }
-
-    try {
-      // Clean up old connection
-      _onDisconnectSub?.cancel();
-      _onPressSub?.cancel();
-      _onSubsUpdatedSub?.cancel();
-      _onNetworkProbeSub?.cancel();
-      _tinode?.disconnect();
-      _tinode = null;
-
-      await connect();
-      await _reattachTopicControllers();
-    } catch (e) {
-      _log('Reconnection failed: $e');
-      // connect() already calls _scheduleReconnect on failure
     }
   }
 
@@ -672,14 +598,14 @@ class TicTacModule {
     if (_isReconnecting) return;
 
     _firstFailureTime ??= DateTime.now();
-
     final elapsed = DateTime.now().difference(_firstFailureTime!);
     if (elapsed >= config.maxReconnectDuration) {
-      _log('Reconnect timeout — ${config.maxReconnectDuration.inMinutes}min elapsed');
+      _log('Reconnect timeout — ${config.maxReconnectDuration.inMinutes}min');
       _connectionState.add(TicTacConnectionState.failed);
-      onDisconnected?.call(
-        'Chat unavailable — could not reconnect after ${config.maxReconnectDuration.inMinutes} minutes',
-      );
+      _fire((c) => c.onDisconnected?.call(
+        'Chat unavailable — could not reconnect after '
+        '${config.maxReconnectDuration.inMinutes} minutes',
+      ));
       return;
     }
 
@@ -691,17 +617,15 @@ class TicTacModule {
     if (_reconnectAttempts <= config.aggressiveAttempts) {
       final exponential = config.initialReconnectDelay.inMilliseconds *
           pow(2.0, _reconnectAttempts - 1);
-      baseDelayMs = min(exponential.toInt(), config.maxAggressiveDelay.inMilliseconds);
+      baseDelayMs =
+          min(exponential.toInt(), config.maxAggressiveDelay.inMilliseconds);
     } else {
       baseDelayMs = config.coverInterval.inMilliseconds;
     }
-
-    final jitter = baseDelayMs * config.jitterFactor * (2 * _random.nextDouble() - 1);
-    final finalDelayMs = max(100, (baseDelayMs + jitter).round());
-    final finalDelay = Duration(milliseconds: finalDelayMs);
-
-    final phase = _reconnectAttempts <= config.aggressiveAttempts ? 'aggressive' : 'cover';
-    _log('Reconnecting in ${finalDelay.inMilliseconds}ms (attempt $_reconnectAttempts, $phase)');
+    final jitter =
+        baseDelayMs * config.jitterFactor * (2 * _random.nextDouble() - 1);
+    final finalDelay =
+        Duration(milliseconds: max(100, (baseDelayMs + jitter).round()));
 
     Future.delayed(finalDelay, () {
       _isReconnecting = false;
@@ -710,77 +634,97 @@ class TicTacModule {
   }
 
   // ---------------------------------------------------------------------------
-  // Presence handling
+  // Authentication
   // ---------------------------------------------------------------------------
 
-  void _handlePresence(tinode.PresMessage pres) {
-    if (pres.src == null) return;
-
-    final what = pres.what;
-    if (what == 'on' || what == 'off') {
-      final isOnline = what == 'on';
-      final tinodeUserId = pres.src!;
-
-      // Reverse lookup to app user ID
-      identityResolver.reverseLookup(tinodeUserId).then((resolvedId) {
-        final appUserId = resolvedId ??
-            onUnresolvedPresence?.call(tinodeUserId, isOnline);
-        if (appUserId == null) return;
-        _presenceMap[appUserId] = isOnline;
-        onPresenceChanged?.call(appUserId, isOnline);
-      }).catchError((e) {
-        _log('Presence reverseLookup error: $e');
-      });
-    }
-  }
-
-  void _handleSubsUpdated(List<tinode.TopicSubscription> subs) {
-    // Seed identity resolver from subscription metadata
-    for (final sub in subs) {
-      if (sub.user != null && sub.public != null && sub.public is Map) {
-        final appUserId = (sub.public as Map)['appUserId'];
-        if (appUserId != null && appUserId is String) {
-          identityResolver.addMapping(appUserId, sub.user!);
-        }
+  Future<void> _authenticate() async {
+    if (_cachedToken != null &&
+        _cachedToken!.token.isNotEmpty &&
+        _cachedToken!.expires.isAfter(DateTime.now())) {
+      try {
+        await _tinode!.loginToken(_cachedToken!.token, {});
+        return;
+      } catch (_) {
+        _log('Token login failed, falling back to REST auth');
+        _cachedToken = null;
       }
     }
+    final secret = RestAuthSecret(
+      appUserId: config.appUserId,
+      appId: config.appId,
+      appKey: config.appKey,
+      provision: config.provision,
+    );
+    await _tinode!.login('rest', base64.encode(secret.toBytes()), null);
+    _cachedToken = _tinode!.getAuthenticationToken();
   }
 
   // ---------------------------------------------------------------------------
-  // Helpers
+  // Me-topic event handlers
   // ---------------------------------------------------------------------------
+
+  void _handleMePresence(tinode.PresMessage pres) {
+    if (pres.src == null) return;
+    final what = pres.what;
+    if (what != 'on' && what != 'off') return;
+    final isOnline = what == 'on';
+    config.resolveAppUserId(pres.src!).then((appUserId) {
+      if (appUserId == null) return;
+      _fire((c) => c.onUserPresenceChanged?.call(appUserId, isOnline));
+    }).catchError((e) {
+      _log('me-presence resolve error: $e');
+    });
+  }
+
+  /// Diff [_knownTopicIds] against the latest sub dump, fire add/remove
+  /// callbacks for deltas.
+  void _handleSubsUpdated(List<tinode.TopicSubscription> subs) async {
+    final me = _tinode?.getMeTopic();
+    if (me == null) return;
+    final fresh = await _buildTopicList(me);
+    final freshIds = fresh.map((t) => t.id).toSet();
+
+    final removed = _knownTopicIds.difference(freshIds);
+    for (final id in removed) {
+      _fire((c) => c.onTopicRemoved?.call(id, 'unsubscribed'));
+    }
+    final added = freshIds.difference(_knownTopicIds);
+    final addedTopics = fresh.where((t) => added.contains(t.id));
+    for (final t in addedTopics) {
+      _fire((c) => c.onTopicAdded?.call(t));
+    }
+    final updated = fresh.where((t) =>
+        _knownTopicIds.contains(t.id) && !added.contains(t.id));
+    for (final t in updated) {
+      _fire((c) => c.onTopicUpdated?.call(t));
+    }
+    _knownTopicIds
+      ..clear()
+      ..addAll(freshIds);
+  }
 
   Future<List<tictac_models.Topic>> _buildTopicList(tinode.TopicMe me) async {
     final topics = <tictac_models.Topic>[];
-
     for (final sub in me.contacts) {
       if (sub.topic == null) continue;
-
-      // Skip system topics
       final topicName = sub.topic!;
-      if (topicName == 'me' || topicName == 'fnd' || topicName == 'sys') continue;
-
+      if (topicName == 'me' || topicName == 'fnd' || topicName == 'sys') {
+        continue;
+      }
       final isP2P = tinode.Tools.isP2PTopicName(topicName);
       final isGroup = tinode.Tools.isGroupTopicName(topicName);
       if (!isP2P && !isGroup) continue;
 
-      // Resolve display name:
-      // 1. Check local name map (set during createGroupTopic/createDirectTopic)
-      // 2. Check subscription's public field (user's display name for P2P)
-      // 3. For group topics, fetch topic description from server
-      String? displayName = _topicNames[topicName];
-      if (displayName == null && sub.public != null && sub.public is Map) {
+      String? displayName;
+      if (sub.public != null && sub.public is Map) {
         displayName = (sub.public as Map)['fn'];
       }
       if (displayName == null && isGroup) {
-        // Fetch topic description from server for the group name
         try {
           final topic = _tinode!.getTopic(topicName);
-          // Check if the topic already has cached desc
           if (topic.public != null && topic.public is Map) {
             displayName = (topic.public as Map)['fn'];
           }
-          // If not, subscribe briefly to get the desc
           if (displayName == null) {
             await topic.subscribe(
               tinode.MetaGetBuilder(topic).withDesc(null).build(),
@@ -794,14 +738,10 @@ class TicTacModule {
         } catch (_) {}
       }
 
-      // Build last message preview if available
       MessagePreview? lastMessage;
-      // seq indicates messages exist but we don't have content from the sub
-
-      // Resolve other member IDs (excludes current user)
       final memberIds = <String>[];
       if (isP2P) {
-        final otherAppUserId = await identityResolver.reverseLookup(topicName);
+        final otherAppUserId = await config.resolveAppUserId(topicName);
         if (otherAppUserId != null) {
           memberIds.add(otherAppUserId);
           displayName ??= otherAppUserId;
@@ -817,37 +757,298 @@ class TicTacModule {
         memberCount: isP2P ? 2 : (sub.seq ?? 0),
       ));
     }
-
     return topics;
-  }
-
-  /// Write our own appUserId into me.public.appUserId. Called by
-  /// TopicController when it sees a self-subscription whose public lacks
-  /// the field (older accounts provisioned before the auth lambda started
-  /// setting it). Read-merge-write so we don't clobber other public fields
-  /// like fn / photo, and skipped if the value is already correct.
-  Future<void> _setSelfPublicAppUserId(String appUserId) async {
-    if (_tinode == null) return;
-    try {
-      final me = _tinode!.getMeTopic();
-      final Map<String, dynamic> merged = {};
-      if (me.public is Map) {
-        merged.addAll(Map<String, dynamic>.from(me.public as Map));
-      }
-      if (merged['appUserId'] == appUserId) return; // already correct
-      merged['appUserId'] = appUserId;
-
-      final params = tinode.SetParams()
-        ..desc = (tinode.TopicDescription()..public = merged);
-      await me.setMeta(params);
-      _log('Self-heal: wrote appUserId=$appUserId to me.public');
-    } catch (e) {
-      _log('Self-heal failed: $e');
-    }
   }
 
   void _log(String message) {
     // ignore: avoid_print
     print('TicTac: $message');
   }
+}
+
+// ===========================================================================
+// _ActiveTopic — internal, holds a tinode.Topic subscription's stream
+// listeners and the public TopicHandle. Created on joinTopic, disposed
+// on leave / deleteTopic / module dispose. No external accessors.
+// ===========================================================================
+
+class _ActiveTopic {
+  final String topicId;
+  final TicTacModule module;
+  tinode.Topic _topic;
+  late final _TopicHandleImpl handle;
+
+  StreamSubscription? _dataSub;
+  StreamSubscription? _presSub;
+  StreamSubscription? _infoSub;
+  StreamSubscription? _metaSubSub;
+  StreamSubscription? _delMessagesSub;
+
+  bool _disposed = false;
+
+  _ActiveTopic({
+    required this.topicId,
+    required tinode.Topic topic,
+    required this.module,
+  }) : _topic = topic {
+    handle = _TopicHandleImpl(this);
+  }
+
+  /// Re-fire onMessageReceived for every message currently in the SDK's
+  /// local cache. Used when a UI rejoins an already-active topic so it
+  /// can populate without hitting the network. Listeners are expected to
+  /// dedupe by message id (TicTacChat already does this).
+  void replayCachedMessages() {
+    if (_disposed) return;
+    for (final data in _topic.messages) {
+      _onData(data);
+    }
+  }
+
+  void attach() {
+    _dataSub?.cancel();
+    _dataSub = _topic.onData.listen(_onData);
+    _presSub?.cancel();
+    _presSub = _topic.onPres.listen(_onPres);
+    _infoSub?.cancel();
+    _infoSub = _topic.onInfo.listen(_onInfo);
+    _metaSubSub?.cancel();
+    _metaSubSub = _topic.onMetaSub.listen(_onMetaSub);
+    // Note: tinode.dart's Topic doesn't currently expose a per-message
+    // delete stream — onMessageDeleted is best-effort via the data
+    // stream's tombstone messages. Wire up when the SDK gains a proper
+    // event.
+  }
+
+  void reattach(tinode.Topic topic) {
+    _topic = topic;
+    attach();
+  }
+
+  void _onData(tinode.DataMessage? data) {
+    if (data == null) return;
+    final from = data.from;
+    if (from == null) return;
+    final seq = data.seq;
+    module._log('topic($topicId): _onData seq=$seq from=$from — resolving');
+    final t0 = DateTime.now();
+    module.config.resolveAppUserId(from).then((appUserId) {
+      module._log(
+        'topic($topicId): _onData seq=$seq resolved to $appUserId '
+        'in ${DateTime.now().difference(t0).inMilliseconds}ms',
+      );
+      if (appUserId == null) return;
+      final author = types.User(id: appUserId);
+      final msgId = data.seq?.toString() ?? '';
+      final created =
+          data.ts?.millisecondsSinceEpoch ?? DateTime.now().millisecondsSinceEpoch;
+      final isOwn = appUserId == module.config.appUserId;
+      final status = isOwn ? types.Status.sent : null;
+
+      final types.Message msg;
+      if (data.content is Map) {
+        final map = data.content as Map;
+        if (map.containsKey('customType')) {
+          msg = types.CustomMessage(
+            id: msgId,
+            author: author,
+            createdAt: created,
+            status: status,
+            metadata: {
+              'customType': map['customType'],
+              if (map['payload'] != null) 'payload': map['payload'],
+              if (map['fallbackText'] != null)
+                'fallbackText': map['fallbackText'],
+            },
+          );
+        } else {
+          msg = types.TextMessage(
+            id: msgId,
+            author: author,
+            text: data.content.toString(),
+            createdAt: created,
+            status: status,
+          );
+        }
+      } else {
+        msg = types.TextMessage(
+          id: msgId,
+          author: author,
+          text: data.content?.toString() ?? '',
+          createdAt: created,
+          status: status,
+        );
+      }
+      module._fire((c) => c.onMessageReceived?.call(topicId, msg));
+    }).catchError((e) {
+      module._log('topic($topicId): data resolve error: $e');
+    });
+  }
+
+  void _onPres(tinode.PresMessage? pres) {
+    if (pres == null) return;
+    if (pres.what != 'on' && pres.what != 'off') return;
+    final tinodeUserId = pres.src;
+    if (tinodeUserId == null) return;
+    final isOnline = pres.what == 'on';
+    module.config.resolveAppUserId(tinodeUserId).then((appUserId) {
+      if (appUserId == null) return;
+      module._fire((c) => c.onTopicPresenceChanged?.call(topicId, appUserId, isOnline));
+    }).catchError((e) {
+      module._log('topic($topicId): pres resolve error: $e');
+    });
+  }
+
+  void _onInfo(dynamic info) {
+    if (info is! Map) return;
+    if (info['what'] != 'kp') return;
+    final from = info['from'] as String?;
+    if (from == null) return;
+    module.config.resolveAppUserId(from).then((appUserId) {
+      if (appUserId == null || appUserId == module.config.appUserId) return;
+      module._fire((c) => c.onTypingStarted?.call(topicId, appUserId));
+    }).catchError((e) {
+      module._log('topic($topicId): typing resolve error: $e');
+    });
+  }
+
+  void _onMetaSub(tinode.TopicSubscription sub) {
+    if (sub.user == null) return;
+    // Fast path: appUserId in public profile.
+    String? appUserId;
+    if (sub.public != null && sub.public is Map) {
+      appUserId = (sub.public as Map)['appUserId'];
+    }
+    if (appUserId != null && appUserId.isNotEmpty) {
+      _fireMember(appUserId, sub);
+      return;
+    }
+    module.config.resolveAppUserId(sub.user!).then((resolved) {
+      if (resolved == null) return;
+      _fireMember(resolved, sub);
+    }).catchError((e) {
+      module._log('topic($topicId): metaSub resolve error: $e');
+    });
+  }
+
+  void _fireMember(String appUserId, tinode.TopicSubscription sub) {
+    final member = types.User(id: appUserId);
+    module._fire((c) => c.onMemberAdded?.call(topicId, member));
+    final online = sub.online;
+    if (online != null) {
+      module._fire((c) => c.onTopicPresenceChanged?.call(topicId, appUserId, online));
+    }
+  }
+
+  Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    await _dataSub?.cancel();
+    await _presSub?.cancel();
+    await _infoSub?.cancel();
+    await _metaSubSub?.cancel();
+    await _delMessagesSub?.cancel();
+  }
+
+  // ---- TopicHandle delegate methods ----
+
+  Future<void> sendText(String text) async {
+    final msg = _topic.createMessage(text, true);
+    await _topic.publishMessage(msg);
+  }
+
+  Future<void> sendCustom(
+    String customType,
+    Map<String, dynamic> payload, {
+    String? fallbackText,
+  }) async {
+    final content = {
+      'customType': customType,
+      'payload': payload,
+      'fallbackText': fallbackText ?? '',
+    };
+    final msg = _topic.createMessage(content, true);
+    await _topic.publishMessage(msg);
+  }
+
+  Future<void> markRead(String messageId) async {
+    final seq = int.tryParse(messageId);
+    if (seq == null) return;
+    _topic.noteRead(seq);
+  }
+
+  Future<void> setTyping(bool isTyping) async {
+    if (!isTyping) return; // protocol has no "stop typing" event
+    _topic.noteKeyPress();
+  }
+
+  Future<void> deleteMessage(String messageId) async {
+    final seq = int.tryParse(messageId);
+    if (seq == null) return;
+    await _topic.deleteMessages(
+      [tinode.DelRange(low: seq, hi: seq + 1)],
+      true,
+    );
+  }
+
+  Future<void> leave() async {
+    // Idempotent: TicTacChat owns the topic's lifecycle and calls leave
+    // from its dispose, while host code (the bridge) may also call leave
+    // from its own dispose path. Without this guard, the second call
+    // re-fires Topic.leave on an already-left subscription, surfacing
+    // "Cannot publish on inactive topic" exceptions.
+    if (_disposed) return;
+    await dispose();
+    module._activeTopics.remove(topicId);
+    // Topic.leave does two things we need: (a) sends LEAVE on the
+    // wire, (b) calls resetSubscription() to clear the local
+    // `_subscribed` flag so the next join re-issues a SUB and re-fetches
+    // cached messages. Routing through Tinode.leave directly skips (b),
+    // which means a subsequent joinTopic sees `isSubscribed=true` and
+    // silently skips the SUB → no message replay.
+    //
+    // Topic.leave throws a `'CtrlMessage' is not a subtype of
+    // 'Map<String, dynamic>'` cast error AFTER both (a) and (b) have
+    // completed (the cast is on the return value). Swallow it so the
+    // caller doesn't see a phantom failure.
+    try {
+      await _topic.leave(false);
+    } catch (e) {
+      module._log('Topic.leave swallowed cast: $e');
+    }
+  }
+}
+
+/// Thin facade — delegates everything to `_ActiveTopic`. Exists so the
+/// public type doesn't leak `_ActiveTopic`'s internals.
+class _TopicHandleImpl implements TopicHandle {
+  final _ActiveTopic _active;
+  _TopicHandleImpl(this._active);
+
+  @override
+  String get topicId => _active.topicId;
+
+  @override
+  Future<void> sendText(String text) => _active.sendText(text);
+
+  @override
+  Future<void> sendCustom(
+    String customType,
+    Map<String, dynamic> payload, {
+    String? fallbackText,
+  }) =>
+      _active.sendCustom(customType, payload, fallbackText: fallbackText);
+
+  @override
+  Future<void> markRead(String messageId) => _active.markRead(messageId);
+
+  @override
+  Future<void> setTyping(bool isTyping) => _active.setTyping(isTyping);
+
+  @override
+  Future<void> deleteMessage(String messageId) =>
+      _active.deleteMessage(messageId);
+
+  @override
+  Future<void> leave() => _active.leave();
 }

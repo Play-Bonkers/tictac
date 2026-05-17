@@ -1,3 +1,5 @@
+import 'package:tictac/src/tictac/voice/voice_token.dart';
+
 class TicTacConfig {
   /// Tinode server host (e.g. "44.234.36.7")
   final String tinodeHost;
@@ -47,6 +49,11 @@ class TicTacConfig {
   /// Random jitter factor applied to reconnect delays (0.0 - 1.0)
   final double jitterFactor;
 
+  /// Hard timeout on the underlying Tinode websocket connect. The SDK
+  /// can otherwise sit waiting on a dead socket for ~55s before declaring
+  /// failure; this caps that so reconnect logic kicks in promptly.
+  final Duration connectTimeout;
+
   /// Heartbeat interval for detecting dead connections (default: 12s)
   final Duration heartbeatInterval;
 
@@ -56,20 +63,47 @@ class TicTacConfig {
   /// How long the app can be backgrounded before forcing a reconnect (default: 30s)
   final Duration backgroundReconnectThreshold;
 
-  /// TAGS base URL for identity resolution (e.g. "https://dev-tags.playbonkers.com")
-  /// When set, enables TagsIdentityResolver for resolving app user IDs via TAILS.
-  /// When null, uses CachedIdentityResolver (local cache only).
-  final String? tagsBaseUrl;
-
   /// Callback that returns the current auth token (e.g. Cognito JWT).
   /// Called on every connect/reconnect to get a fresh token for the websocket
   /// upgrade Authorization header.
   final Future<String?> Function() authTokenProvider;
 
-  /// Callback that returns the caller's Firebase ID token. Required for the
-  /// VoiceModule (LiveKit token-mint) but optional otherwise — text-chat
-  /// authenticates via [authTokenProvider]. When null, joinVoice will throw.
-  final Future<String?> Function()? getFirebaseIdToken;
+  /// Maps a Tinode user id (e.g. `usrAbCd1234`) to an app user id, or
+  /// returns null if the host doesn't know the mapping.
+  ///
+  /// Called potentially per-event during message / presence / typing /
+  /// member resolution. **TicTac does not cache.** Wrap your
+  /// implementation in a `Map`-backed cache if you want one.
+  ///
+  /// Returning null means "unknown, drop this event" (no message
+  /// surfaced, no member added, no presence emitted).
+  final Future<String?> Function(String tinodeUserId) resolveAppUserId;
+
+  /// Mints a LiveKit access token for a topic. The host owns the HTTP
+  /// call — tictac doesn't know about TAGS, Lambda endpoints, or
+  /// Firebase. Required only if the host calls
+  /// [TicTacModule.joinVoice]; throws otherwise.
+  ///
+  /// Implementation pattern (BonkersClient):
+  /// ```dart
+  /// mintVoiceToken: (topicId) async {
+  ///   final resp = await http.post(
+  ///     Uri.parse('$tagsBaseUrl/voice/token'),
+  ///     headers: {
+  ///       'authorization': 'Bearer ${await firebase.idToken}',
+  ///       'x-app-id': appId, 'x-app-key': appKey,
+  ///     },
+  ///     body: jsonEncode({'topic_id': topicId, 'app_user_id': appUserId}),
+  ///   );
+  ///   final body = jsonDecode(resp.body);
+  ///   return VoiceToken(
+  ///     accessToken: body['token'],
+  ///     livekitUrl:  body['livekit_url'],
+  ///     room:        body['room'],
+  ///   );
+  /// },
+  /// ```
+  final Future<VoiceToken> Function(String topicId)? mintVoiceToken;
 
   /// **Test-only.** When true, the encoded RestAuthSecret has its `provision`
   /// flag set, allowing the auth Lambda to mint a new Tinode account if no
@@ -96,12 +130,13 @@ class TicTacConfig {
     this.coverInterval = const Duration(seconds: 30),
     this.maxReconnectDuration = const Duration(minutes: 7),
     this.jitterFactor = 0.3,
+    this.connectTimeout = const Duration(seconds: 10),
     this.heartbeatInterval = const Duration(seconds: 12),
     this.pongTimeout = const Duration(seconds: 5),
     this.backgroundReconnectThreshold = const Duration(seconds: 30),
-    this.tagsBaseUrl,
     required this.authTokenProvider,
-    this.getFirebaseIdToken,
+    required this.resolveAppUserId,
+    this.mintVoiceToken,
     this.provision = false,
   });
 
