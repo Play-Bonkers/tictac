@@ -132,6 +132,7 @@ your client id — match by author + status, FIFO).
 | `onTopicPresenceChanged(topicId, appUserId, isOnline)` | per-topic on/off |
 | `onUserPresenceChanged(appUserId, isOnline)` | global on/off from the user's me-topic |
 | `onTypingStarted(topicId, appUserId)` | keystroke arrived — protocol has no "stopped typing", caller times it out (3s is conventional) |
+| `onMessageRead(topicId, appUserId, seq)` | a peer read up to `seq` (inclusive; read markers are cumulative) — mark your own messages with id `<= seq` as seen. Fires live and once on join from the peer's subscription. Peers only, not your own reads. |
 
 ---
 
@@ -175,7 +176,8 @@ After resolve, the same callbacks fire on live updates.
 | Member subscription change | `onMemberAdded` / `onMemberRemoved` | `types.User` |
 | Message delete | `onMessageDeleted` | `(topicId, String messageId)` |
 | Voice participant events | `VoiceCallbacks` (separate bag) | `VoiceParticipant` |
-| Read / delivered receipts | not surfaced today | — |
+| Read receipt | `onMessageRead` | `(topicId, appUserId, int seq)` |
+| Delivered (`recv`) receipt | not surfaced | — |
 | Tinode system / control | reflected in member / presence callbacks | no `SystemMessage` type emitted |
 
 ### Custom messages — send + render
@@ -248,6 +250,7 @@ That alone gives you:
 - Typing dots (3s auto-clear)
 - Avatars with presence dots
 - Auto `markRead` on visibility
+- "Seen" status on your messages when a peer reads them
 - Send bar with debounced typing notifications
 
 Three customization tiers:
