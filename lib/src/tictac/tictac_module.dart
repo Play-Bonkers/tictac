@@ -910,17 +910,33 @@ class _ActiveTopic {
     });
   }
 
-  void _onInfo(dynamic info) {
-    if (info is! Map) return;
-    if (info['what'] != 'kp') return;
-    final from = info['from'] as String?;
+  void _onInfo(tinode.InfoMessage info) {
+    final from = info.from;
     if (from == null) return;
-    module.config.resolveAppUserId(from).then((appUserId) {
-      if (appUserId == null || appUserId == module.config.appUserId) return;
-      module._fire((c) => c.onTypingStarted?.call(topicId, appUserId));
-    }).catchError((e) {
-      module._log('topic($topicId): typing resolve error: $e');
-    });
+    switch (info.what) {
+      case 'kp':
+        module.config.resolveAppUserId(from).then((appUserId) {
+          if (appUserId == null || appUserId == module.config.appUserId) return;
+          module._fire((c) => c.onTypingStarted?.call(topicId, appUserId));
+        }).catchError((e) {
+          module._log('topic($topicId): typing resolve error: $e');
+        });
+        break;
+      case 'read':
+        final seq = info.seq;
+        if (seq == null) return;
+        module.config.resolveAppUserId(from).then((appUserId) {
+          // Ignore our own read markers — those track what *we've* read of
+          // the peer's messages, not whether the peer read ours.
+          if (appUserId == null || appUserId == module.config.appUserId) return;
+          module._fire((c) => c.onMessageRead?.call(topicId, appUserId, seq));
+        }).catchError((e) {
+          module._log('topic($topicId): read resolve error: $e');
+        });
+        break;
+      // 'recv' (delivered) intentionally not surfaced — TicTac models only
+      // sent/seen, not a separate delivered state.
+    }
   }
 
   void _onMetaSub(tinode.TopicSubscription sub) {
@@ -948,6 +964,15 @@ class _ActiveTopic {
     final online = sub.online;
     if (online != null) {
       module._fire((c) => c.onTopicPresenceChanged?.call(topicId, appUserId, online));
+    }
+    // Surface the subscriber's read marker so "seen" state is correct on
+    // join (live updates arrive separately via onInfo what=read). Skip our
+    // own subscription — that read value is what we've read, not the peer.
+    final readSeq = sub.read;
+    if (readSeq != null &&
+        readSeq > 0 &&
+        appUserId != module.config.appUserId) {
+      module._fire((c) => c.onMessageRead?.call(topicId, appUserId, readSeq));
     }
   }
 

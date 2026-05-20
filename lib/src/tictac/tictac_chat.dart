@@ -260,6 +260,9 @@ class _TicTacChatState extends State<TicTacChat> {
       onTypingStarted: (topicId, appUserId) {
         if (topicId == widget.topicId) _markTyping(appUserId);
       },
+      onMessageRead: (topicId, appUserId, seq) {
+        if (topicId == widget.topicId) _handleRead(seq);
+      },
     );
     widget.module.addCallbacks(_ownCallbacks);
     _joinTopic();
@@ -333,6 +336,25 @@ class _TicTacChatState extends State<TicTacChat> {
     final removed = _messages.length;
     _messages.removeWhere((m) => m.id == messageId);
     if (_messages.length != removed) setState(() {});
+  }
+
+  // A peer read up to [readSeq] (inclusive). Upgrade our own already-sent
+  // messages at or below that seq to "seen" so flutter_chat_ui renders the
+  // read checkmark. Optimistic placeholders have non-numeric (uuid) ids and
+  // are skipped until their server echo replaces them.
+  void _handleRead(int readSeq) {
+    if (_disposed) return;
+    var changed = false;
+    for (var i = 0; i < _messages.length; i++) {
+      final m = _messages[i];
+      if (m.author.id != _user.id) continue;
+      if (m.status == types.Status.seen) continue;
+      final seq = int.tryParse(m.id);
+      if (seq == null || seq > readSeq) continue;
+      _messages[i] = m.copyWith(status: types.Status.seen);
+      changed = true;
+    }
+    if (changed) setState(() {});
   }
 
   void _handleMemberAdded(types.User member) {

@@ -94,6 +94,14 @@ class TicTacCallbacks {
   /// the indicator alive (`TicTacChat` uses a 3-second auto-clear timer).
   final void Function(String topicId, String appUserId)? onTypingStarted;
 
+  /// [appUserId] has read messages in [topicId] up to and including [seq]
+  /// (read markers are cumulative). Use this to mark your own sent messages
+  /// with `seq <= [seq]` as "seen" in the UI. Fires for peers only — your
+  /// own read markers are not re-surfaced here. Delivered both live (Tinode
+  /// `{info what=read}`) and on join (the peer's subscription `read` value).
+  final void Function(String topicId, String appUserId, int seq)?
+      onMessageRead;
+
   const TicTacCallbacks({
     this.onConnected,
     this.onDisconnected,
@@ -107,5 +115,6 @@ class TicTacCallbacks {
     this.onTopicPresenceChanged,
     this.onUserPresenceChanged,
     this.onTypingStarted,
+    this.onMessageRead,
   });
 }
