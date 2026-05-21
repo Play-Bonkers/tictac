@@ -119,6 +119,20 @@ class TicTacModule {
 
   bool get isConnected => _tinode?.isConnected ?? false;
 
+  /// The connected user's Tinode user id (e.g. "usrAbc123"), or null if not
+  /// connected/authenticated. Exposed so callers and tests can form P2P
+  /// topics directly (createDirectTopic takes a tinode uid) without a TAGS
+  /// resolve roundtrip.
+  String? get tinodeUserId {
+    final t = _tinode;
+    if (t == null || !t.isConnected) return null;
+    try {
+      return t.userId;
+    } catch (_) {
+      return null; // not yet authenticated
+    }
+  }
+
   /// Returns a copy of the current user's `me.public` map, or null if not
   /// connected. Read-only — the provisioner Lambda writes `appUserId`
   /// into this during account creation.

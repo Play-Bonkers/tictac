@@ -31,10 +31,12 @@ class Harness {
   final String appUserId;
   final TicTacModule module;
   final List<_MessageEntry> _messages;
+  final List<_ReadEntry> _reads;
 
   Completer<List<Topic>> _connected;
 
-  Harness._(this.appUserId, this.module, this._connected, this._messages);
+  Harness._(
+      this.appUserId, this.module, this._connected, this._messages, this._reads);
 
   /// Build a harness with a freshly-generated app-user-id.
   factory Harness.boot() => bootWithUserId(uniqueUserId());
@@ -45,6 +47,7 @@ class Harness {
   static Harness bootWithUserId(String appUserId) {
     final connected = Completer<List<Topic>>();
     final messages = <_MessageEntry>[];
+    final reads = <_ReadEntry>[];
     late Harness h;
 
     final config = TicTacConfig(
@@ -71,10 +74,13 @@ class Harness {
       onMessageReceived: (topicId, msg) {
         messages.add(_MessageEntry(topicId, msg));
       },
+      onMessageRead: (topicId, appUserId, seq) {
+        reads.add(_ReadEntry(topicId, appUserId, seq));
+      },
     );
 
     final module = TicTacModule(config, callbacks);
-    h = Harness._(appUserId, module, connected, messages);
+    h = Harness._(appUserId, module, connected, messages, reads);
     return h;
   }
 
@@ -123,6 +129,29 @@ class Harness {
     );
   }
 
+  /// All read receipts surfaced so far (peer marked messages read).
+  List<_ReadEntry> get allReads => List.unmodifiable(_reads);
+
+  /// Poll until a read receipt matching [predicate] arrives on [topicId].
+  /// Used by two-client tests: A waits for B's `onMessageRead`.
+  Future<_ReadEntry> awaitRead({
+    required String topicId,
+    required bool Function(_ReadEntry read) predicate,
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      for (final entry in _reads) {
+        if (entry.topicId == topicId && predicate(entry)) return entry;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    throw TimeoutException(
+      'Timed out after ${timeout.inSeconds}s waiting for a read receipt '
+      'on topic $topicId (received ${_reads.length} so far)',
+    );
+  }
+
   /// Tear down the module's websocket. Tests should always call this in a
   /// teardown / at the end of the test body so the connection doesn't
   /// linger between tests.
@@ -139,4 +168,11 @@ class _MessageEntry {
   final String topicId;
   final types.Message message;
   _MessageEntry(this.topicId, this.message);
+}
+
+class _ReadEntry {
+  final String topicId;
+  final String appUserId;
+  final int seq;
+  _ReadEntry(this.topicId, this.appUserId, this.seq);
 }

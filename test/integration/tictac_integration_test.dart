@@ -173,4 +173,59 @@ void main() {
       await h.dispose();
     });
   });
+
+  group('Read receipts', () {
+    test('peer markRead surfaces onMessageRead to the sender', () async {
+      // Two users, two views of one P2P topic. A sends, B reads, A is told.
+      final a = Harness.boot();
+      final b = Harness.boot();
+      await a.module.connect();
+      await b.module.connect();
+      await a.awaitConnected();
+      await b.awaitConnected();
+
+      final uidA = a.module.tinodeUserId;
+      final uidB = b.module.tinodeUserId;
+      expect(uidA, isNotNull, reason: 'A must expose its tinode uid');
+      expect(uidB, isNotNull, reason: 'B must expose its tinode uid');
+
+      // Each side names the OTHER user's tinode uid — same underlying P2P.
+      final topicA = await a.module.createDirectTopic(uidB!);
+      final topicB = await b.module.createDirectTopic(uidA!);
+
+      final handleA = await a.module.joinTopic(topicA.id);
+      final handleB = await b.module.joinTopic(topicB.id);
+
+      // A sends; A sees its own server echo (message id == seq).
+      await handleA.sendText('read-receipt probe');
+      final echo = await a.awaitMessage(
+        topicId: topicA.id,
+        predicate: (m) =>
+            m is types.TextMessage && m.text == 'read-receipt probe',
+      );
+      final echoSeq = int.parse(echo.id);
+
+      // B receives the same message on its view of the topic.
+      final onB = await b.awaitMessage(
+        topicId: topicB.id,
+        predicate: (m) =>
+            m is types.TextMessage && m.text == 'read-receipt probe',
+      );
+
+      // B marks it read -> A must receive onMessageRead covering that seq.
+      await handleB.markRead(onB.id);
+
+      final read = await a.awaitRead(
+        topicId: topicA.id,
+        predicate: (r) => r.seq >= echoSeq,
+      );
+      expect(read.seq, greaterThanOrEqualTo(echoSeq));
+      expect(read.appUserId, isNotEmpty,
+          reason: 'read receipt should identify the peer');
+
+      await a.module.deleteTopic(topicA.id, hard: true);
+      await a.dispose();
+      await b.dispose();
+    }, timeout: const Timeout(Duration(seconds: 120)));
+  });
 }
