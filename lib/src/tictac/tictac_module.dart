@@ -12,7 +12,6 @@ import 'package:tictac/src/tictac/tictac_config.dart';
 import 'package:tictac/src/tictac/connection_state.dart';
 import 'package:tictac/src/tictac/models/topic.dart' as tictac_models;
 import 'package:tictac/src/tictac/models/topic_type.dart';
-import 'package:tictac/src/tictac/models/message_preview.dart';
 import 'package:tictac/src/tictac/topic_handle.dart';
 import 'package:tictac/src/tictac/voice/voice_callbacks.dart';
 import 'package:tictac/src/tictac/voice/voice_module.dart';
@@ -112,6 +111,11 @@ class TicTacModule {
   StreamSubscription? _onDisconnectSub;
   StreamSubscription? _onPressSub;
   StreamSubscription? _onSubsUpdatedSub;
+  StreamSubscription? _onContactUpdateSub;
+
+  // Topics for which a transient "fetch the latest message" is in flight, so a
+  // burst of `msg` presence events for the same topic doesn't stack subscribes.
+  final Set<String> _fetchingTopics = {};
 
   TicTacModule(this.config, [TicTacCallbacks? initialCallbacks]) {
     if (initialCallbacks != null) _listeners.add(initialCallbacks);
@@ -216,6 +220,13 @@ class TicTacModule {
       _onSubsUpdatedSub?.cancel();
       _onSubsUpdatedSub = me.onSubsUpdated.listen(_handleSubsUpdated);
 
+      // New messages on topics we haven't joined arrive as `msg` presence on
+      // `me` (seq bump only, no content). Fetch the body and surface it via
+      // onMessageReceived so the app sees activity on every topic, not just
+      // joined ones.
+      _onContactUpdateSub?.cancel();
+      _onContactUpdateSub = me.onContactUpdate.listen(_handleContactUpdate);
+
       // Wait for subscription data to arrive from server.
       final subsReady = Completer<void>();
       late StreamSubscription subsSub;
@@ -256,6 +267,11 @@ class TicTacModule {
       await _reattachActiveTopics();
 
       _fire((c) => c.onConnected?.call(topics));
+
+      // Replay each topic's last text + last custom message so the app caches
+      // messages that predate this session (offline catch-up; chats others
+      // started). Fire-and-forget so it doesn't delay connect.
+      unawaited(_warmAllTopics(topics));
     } catch (e) {
       _log('Connection failed: $e');
       _connectionState.add(TicTacConnectionState.disconnected);
@@ -271,6 +287,7 @@ class TicTacModule {
     _onDisconnectSub?.cancel();
     _onPressSub?.cancel();
     _onSubsUpdatedSub?.cancel();
+    _onContactUpdateSub?.cancel();
     _onNetworkProbeSub?.cancel();
     for (final t in _activeTopics.values) {
       await t.dispose();
@@ -577,6 +594,7 @@ class TicTacModule {
       _onDisconnectSub?.cancel();
       _onPressSub?.cancel();
       _onSubsUpdatedSub?.cancel();
+      _onContactUpdateSub?.cancel();
       _onNetworkProbeSub?.cancel();
       _tinode?.disconnect();
       _tinode = null;
@@ -717,6 +735,9 @@ class TicTacModule {
     final addedTopics = fresh.where((t) => added.contains(t.id));
     for (final t in addedTopics) {
       _fire((c) => c.onTopicAdded?.call(t));
+      // A topic that just appeared (someone started a chat) may already hold
+      // messages — warm it so the app caches them.
+      unawaited(_warmTopic(t.id));
     }
     final updated = fresh.where((t) =>
         _knownTopicIds.contains(t.id) && !added.contains(t.id));
@@ -726,6 +747,210 @@ class TicTacModule {
     _knownTopicIds
       ..clear()
       ..addAll(freshIds);
+  }
+
+  /// Build the app-facing message from a Tinode data message. Shared by the
+  /// joined-topic data stream and the fetch-on-presence path so both produce
+  /// identical messages. Null if the author can't be resolved.
+  Future<types.Message?> _buildMessage(
+      String topicId, tinode.DataMessage data) async {
+    final from = data.from;
+    if (from == null) return null;
+    final appUserId = await config.resolveAppUserId(from);
+    if (appUserId == null) return null;
+
+    final author = types.User(id: appUserId);
+    final msgId = data.seq?.toString() ?? '';
+    final created = data.ts?.millisecondsSinceEpoch ??
+        DateTime.now().millisecondsSinceEpoch;
+    final status = appUserId == config.appUserId ? types.Status.sent : null;
+
+    final content = data.content;
+    if (content is Map && content.containsKey('customType')) {
+      return types.CustomMessage(
+        id: msgId,
+        author: author,
+        createdAt: created,
+        status: status,
+        metadata: {
+          'customType': content['customType'],
+          if (content['payload'] != null) 'payload': content['payload'],
+          if (content['fallbackText'] != null)
+            'fallbackText': content['fallbackText'],
+        },
+      );
+    }
+    return types.TextMessage(
+      id: msgId,
+      author: author,
+      text: content?.toString() ?? '',
+      createdAt: created,
+      status: status,
+    );
+  }
+
+  /// Handle a `me` contact update. A new message on a topic we haven't joined
+  /// arrives as `what == 'msg'` (seq bump, no content) — fetch the body and
+  /// surface it like a joined-topic message, plus an onTopicUpdated carrying
+  /// refreshed unread/touched.
+  void _handleContactUpdate(tinode.ContactUpdateEvent ev) {
+    if (ev.what != 'msg') return;
+    final topicName = ev.contact.topic;
+    if (topicName == null) return;
+    if (topicName == 'me' || topicName == 'fnd' || topicName == 'sys') return;
+    // Joined topics already deliver via their live data stream.
+    if (_activeTopics.containsKey(topicName)) return;
+    _fetchAndDeliverLatest(topicName, ev.contact);
+  }
+
+  Future<void> _fetchAndDeliverLatest(
+      String topicName, tinode.TopicSubscription sub) async {
+    final t = _tinode;
+    if (t == null) return;
+    if (!_fetchingTopics.add(topicName)) return; // already in flight
+
+    try {
+      final topic = t.getTopic(topicName);
+      await topic.subscribe(
+        tinode.MetaGetBuilder(topic).withData(null, null, 1).build(),
+        null,
+      );
+      final msgs = topic.messages;
+      if (msgs.isNotEmpty) {
+        // Do NOT markRead — a background fetch must not advance the read
+        // marker, or it would wipe the unread count.
+        final msg = await _buildMessage(topicName, msgs.last);
+        if (msg != null) {
+          _fire((c) => c.onMessageReceived?.call(topicName, msg));
+        }
+      }
+      await topic.leave(false);
+    } catch (e) {
+      _log('fetch-on-presence for $topicName failed: $e');
+    } finally {
+      _fetchingTopics.remove(topicName);
+    }
+
+    final updated = await _buildTopicFromSub(sub);
+    if (updated != null) {
+      _fire((c) => c.onTopicUpdated?.call(updated));
+    }
+  }
+
+  /// Build a single tictac Topic from a `me` contact subscription — no extra
+  /// desc round-trip (uses the cached `fn`), for cheap onTopicUpdated events.
+  Future<tictac_models.Topic?> _buildTopicFromSub(
+      tinode.TopicSubscription sub) async {
+    final topicName = sub.topic;
+    if (topicName == null) return null;
+    final isP2P = tinode.Tools.isP2PTopicName(topicName);
+    final isGroup = tinode.Tools.isGroupTopicName(topicName);
+    if (!isP2P && !isGroup) return null;
+
+    String? displayName;
+    if (sub.public is Map) displayName = (sub.public as Map)['fn'];
+
+    final memberIds = <String>[];
+    if (isP2P) {
+      final otherAppUserId = await config.resolveAppUserId(topicName);
+      if (otherAppUserId != null) {
+        memberIds.add(otherAppUserId);
+        displayName ??= otherAppUserId;
+      }
+    }
+
+    return tictac_models.Topic(
+      id: topicName,
+      name: displayName,
+      type: isP2P ? TopicType.direct : TopicType.group,
+      memberAppUserIds: memberIds,
+      memberCount: isP2P ? 2 : (sub.seq ?? 0),
+      unreadCount: sub.unread ?? 0,
+      lastActivity: sub.touched,
+    );
+  }
+
+  static bool _isCustomData(tinode.DataMessage d) =>
+      d.content is Map && (d.content as Map).containsKey('customType');
+
+  /// Warm a topic's cache: fetch recent history and replay the **last text**
+  /// and **last custom** message through onMessageReceived. This surfaces
+  /// messages that were already in the topic before this session — a chat
+  /// someone else started, or anything that arrived while logged out — which
+  /// never generate a live `msg` presence. Skips joined topics (joinTopic
+  /// already replays their history).
+  Future<void> _warmTopic(String topicName, {int scan = 30}) async {
+    final t = _tinode;
+    if (t == null) return;
+    if (topicName == 'me' || topicName == 'fnd' || topicName == 'sys') return;
+    if (_activeTopics.containsKey(topicName)) return;
+    if (!_fetchingTopics.add(topicName)) return; // in flight (warm or live fetch)
+
+    // seq -> message, deduped. Collect from the data stream (frames can land
+    // just after the subscribe ctrl resolves) and from the topic's cache.
+    final collected = <int, tinode.DataMessage>{};
+    try {
+      final topic = t.getTopic(topicName);
+      final dataSub = topic.onData.listen((d) {
+        final seq = d?.seq;
+        if (seq != null) collected[seq] = d!;
+      });
+      try {
+        // withData(null,null,limit) = latest `scan` messages. (withLaterData is
+        // a no-op until a topic has loaded data, so it can't do a fresh fetch.)
+        await topic.subscribe(
+          tinode.MetaGetBuilder(topic).withData(null, null, scan).build(),
+          null,
+        );
+        // Let the {data} frames drain — they can arrive after the ctrl.
+        await Future<void>.delayed(const Duration(milliseconds: 600));
+      } finally {
+        await dataSub.cancel();
+      }
+      for (final d in topic.messages) {
+        final seq = d.seq;
+        if (seq != null) collected[seq] = d;
+      }
+      await topic.leave(false);
+    } catch (e) {
+      _log('warm topic $topicName failed: $e');
+    } finally {
+      _fetchingTopics.remove(topicName);
+    }
+
+    final all = collected.values.toList()
+      ..sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    _log('warm $topicName: ${all.length} message(s) fetched');
+
+    // Ascending by seq, so the last assignment of each kind is the newest.
+    tinode.DataMessage? lastText;
+    tinode.DataMessage? lastCustom;
+    for (final d in all) {
+      if (_isCustomData(d)) {
+        lastCustom = d;
+      } else {
+        lastText = d;
+      }
+    }
+    final picks = <tinode.DataMessage>[
+      if (lastText != null) lastText,
+      if (lastCustom != null) lastCustom,
+    ]..sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    for (final d in picks) {
+      final msg = await _buildMessage(topicName, d);
+      if (msg != null) {
+        _fire((c) => c.onMessageReceived?.call(topicName, msg));
+      }
+    }
+  }
+
+  /// Warm all topics with bounded concurrency so a large list doesn't fire a
+  /// storm of subscribes at connect.
+  Future<void> _warmAllTopics(List<tictac_models.Topic> topics) async {
+    const batchSize = 4;
+    for (var i = 0; i < topics.length; i += batchSize) {
+      await Future.wait(topics.skip(i).take(batchSize).map((t) => _warmTopic(t.id)));
+    }
   }
 
   Future<List<tictac_models.Topic>> _buildTopicList(tinode.TopicMe me) async {
@@ -763,7 +988,6 @@ class TicTacModule {
         } catch (_) {}
       }
 
-      MessagePreview? lastMessage;
       final memberIds = <String>[];
       if (isP2P) {
         final otherAppUserId = await config.resolveAppUserId(topicName);
@@ -778,8 +1002,9 @@ class TicTacModule {
         name: displayName,
         type: isP2P ? TopicType.direct : TopicType.group,
         memberAppUserIds: memberIds,
-        lastMessage: lastMessage,
         memberCount: isP2P ? 2 : (sub.seq ?? 0),
+        unreadCount: sub.unread ?? 0,
+        lastActivity: sub.touched,
       ));
     }
     return topics;
@@ -852,58 +1077,8 @@ class _ActiveTopic {
 
   void _onData(tinode.DataMessage? data) {
     if (data == null) return;
-    final from = data.from;
-    if (from == null) return;
-    final seq = data.seq;
-    module._log('topic($topicId): _onData seq=$seq from=$from — resolving');
-    final t0 = DateTime.now();
-    module.config.resolveAppUserId(from).then((appUserId) {
-      module._log(
-        'topic($topicId): _onData seq=$seq resolved to $appUserId '
-        'in ${DateTime.now().difference(t0).inMilliseconds}ms',
-      );
-      if (appUserId == null) return;
-      final author = types.User(id: appUserId);
-      final msgId = data.seq?.toString() ?? '';
-      final created =
-          data.ts?.millisecondsSinceEpoch ?? DateTime.now().millisecondsSinceEpoch;
-      final isOwn = appUserId == module.config.appUserId;
-      final status = isOwn ? types.Status.sent : null;
-
-      final types.Message msg;
-      if (data.content is Map) {
-        final map = data.content as Map;
-        if (map.containsKey('customType')) {
-          msg = types.CustomMessage(
-            id: msgId,
-            author: author,
-            createdAt: created,
-            status: status,
-            metadata: {
-              'customType': map['customType'],
-              if (map['payload'] != null) 'payload': map['payload'],
-              if (map['fallbackText'] != null)
-                'fallbackText': map['fallbackText'],
-            },
-          );
-        } else {
-          msg = types.TextMessage(
-            id: msgId,
-            author: author,
-            text: data.content.toString(),
-            createdAt: created,
-            status: status,
-          );
-        }
-      } else {
-        msg = types.TextMessage(
-          id: msgId,
-          author: author,
-          text: data.content?.toString() ?? '',
-          createdAt: created,
-          status: status,
-        );
-      }
+    module._buildMessage(topicId, data).then((msg) {
+      if (msg == null) return;
       module._fire((c) => c.onMessageReceived?.call(topicId, msg));
     }).catchError((e) {
       module._log('topic($topicId): data resolve error: $e');
