@@ -100,7 +100,7 @@ bags are supported — the module fans out every event to all of them.
 
 | Callback | Fires | Carries |
 |---|---|---|
-| `onConnected(topics)` | auth + heartbeat up; refires after every auto-reconnect | `List<Topic>` — current subscriptions |
+| `onConnected(topics)` | auth + heartbeat up; refires after every auto-reconnect | `List<Topic>` — current subscriptions. Each `Topic` carries `unreadCount` and `lastActivity` (Tinode `touched`) for list rows. |
 | `onDisconnected(reason)` | drop, or terminal-fail after ~7 min of reconnect retries | reason string |
 
 ### Topics
@@ -109,14 +109,21 @@ bags are supported — the module fans out every event to all of them.
 |---|---|
 | `onTopicAdded(topic)` | a new subscription appeared (you accepted an invite, a friend added you) |
 | `onTopicRemoved(topicId, reason)` | subscription gone |
-| `onTopicUpdated(topic)` | metadata changed (name, desc) |
+| `onTopicUpdated(topic)` | metadata changed (name, desc), or new activity on a non-joined topic (refreshed `unreadCount` / `lastActivity`) |
 
-### Messages — global, across every joined topic
+### Messages — global, across all topics (joined or not)
 
 | Callback | Fires |
 |---|---|
-| `onMessageReceived(topicId, message)` | every incoming + every cached message replayed on `joinTopic` + your own send echo |
+| `onMessageReceived(topicId, message)` | every incoming message on every topic + every cached message replayed on `joinTopic` + your own send echo. For topics you have **not** joined, the library fetches the new message body on activity and delivers it here too — so you can keep a per-topic "last message" cache without joining. Does **not** mark the message read (unread is preserved). |
 | `onMessageDeleted(topicId, messageId)` | server confirmed a delete |
+
+**Cold-start / catch-up:** on `connect` (and when a topic first appears via
+`onTopicAdded`), the library replays each topic's **last text** and **last
+custom** message through `onMessageReceived` — so messages already in a topic
+before this session (a chat someone else started, anything that arrived while
+logged out) populate your per-topic cache without joining. Expect a short burst
+of `onMessageReceived` right after `onConnected`.
 
 The caller dedupes by `message.id`. For optimistic-send → echo, you
 insert your placeholder with a client-generated id and replace it on

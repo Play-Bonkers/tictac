@@ -300,7 +300,9 @@ class Topic {
       _cacheManager.delete('topic', name ?? '');
       _gone();
     }
-    return CtrlMessage.fromMessage(ctrl);
+    return ctrl is CtrlMessage
+        ? ctrl
+        : CtrlMessage.fromMessage(ctrl as Map<String, dynamic>);
   }
 
   /// Request topic metadata from the serve

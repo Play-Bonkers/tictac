@@ -17,7 +17,6 @@ export 'src/tictac/models/topic.dart' show Topic;
 export 'src/tictac/models/topic_type.dart' show TopicType;
 export 'src/tictac/models/member.dart' show Member;
 export 'src/tictac/models/chat_presence_state.dart' show ChatPresenceState;
-export 'src/tictac/models/message_preview.dart' show MessagePreview;
 
 // Voice (LiveKit)
 export 'src/tictac/voice/voice_session.dart' show VoiceSession;
