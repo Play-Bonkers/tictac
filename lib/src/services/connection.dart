@@ -53,6 +53,12 @@ class ConnectionService {
     ).timeout(Duration(milliseconds: 5000));
     _connecting = false;
     _loggerService.log('Connected.');
+    // Enable WS-level ping/pong. Tinode's idleSessionTimeout is a hardcoded
+    // 55s (server/main.go), and Tinode only resets the read deadline on
+    // protocol-level Pong frames. With pingInterval = null, dart:io doesn't
+    // activate the ping/pong machinery, so Tinode reaps the session every
+    // ~55s. 30s keeps us well inside the window.
+    _ws!.pingInterval = const Duration(seconds: 30);
     _channel = IOWebSocketChannel(_ws!);
     onOpen.add('Opened');
     _channel!.stream.listen(

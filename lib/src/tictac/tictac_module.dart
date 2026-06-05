@@ -707,9 +707,15 @@ class TicTacModule {
   // ---------------------------------------------------------------------------
 
   void _handleMePresence(tinode.PresMessage pres) {
+    _log('BNK564 _handleMePresence what=${pres.what} src=${pres.src} '
+        'topic=${pres.topic} seq=${pres.seq} act=${pres.act} tgt=${pres.tgt}');
     if (pres.src == null) return;
     final what = pres.what;
-    if (what != 'on' && what != 'off') return;
+    if (what != 'on' && what != 'off') {
+      _log('BNK564 _handleMePresence SKIP — what=$what (only on/off handled '
+          'here; msg/acs/etc. route via onContactUpdate)');
+      return;
+    }
     final isOnline = what == 'on';
     config.resolveAppUserId(pres.src!).then((appUserId) {
       if (appUserId == null) return;
@@ -722,18 +728,27 @@ class TicTacModule {
   /// Diff [_knownTopicIds] against the latest sub dump, fire add/remove
   /// callbacks for deltas.
   void _handleSubsUpdated(List<tinode.TopicSubscription> subs) async {
+    _log('BNK564 _handleSubsUpdated: subs.length=${subs.length} '
+        'subs=${subs.map((s) => s.topic).toList()}');
     final me = _tinode?.getMeTopic();
-    if (me == null) return;
+    if (me == null) {
+      _log('BNK564 _handleSubsUpdated: ABORT — me topic null');
+      return;
+    }
     final fresh = await _buildTopicList(me);
     final freshIds = fresh.map((t) => t.id).toSet();
+    _log('BNK564 _handleSubsUpdated: fresh=$freshIds known=$_knownTopicIds');
 
     final removed = _knownTopicIds.difference(freshIds);
     for (final id in removed) {
+      _log('BNK564 _handleSubsUpdated: REMOVED $id');
       _fire((c) => c.onTopicRemoved?.call(id, 'unsubscribed'));
     }
     final added = freshIds.difference(_knownTopicIds);
     final addedTopics = fresh.where((t) => added.contains(t.id));
     for (final t in addedTopics) {
+      _log('BNK564 _handleSubsUpdated: ADDED ${t.id} — firing onTopicAdded '
+          '+ scheduling _warmTopic');
       _fire((c) => c.onTopicAdded?.call(t));
       // A topic that just appeared (someone started a chat) may already hold
       // messages — warm it so the app caches them.
@@ -742,6 +757,7 @@ class TicTacModule {
     final updated = fresh.where((t) =>
         _knownTopicIds.contains(t.id) && !added.contains(t.id));
     for (final t in updated) {
+      _log('BNK564 _handleSubsUpdated: UPDATED ${t.id}');
       _fire((c) => c.onTopicUpdated?.call(t));
     }
     _knownTopicIds
@@ -755,9 +771,19 @@ class TicTacModule {
   Future<types.Message?> _buildMessage(
       String topicId, tinode.DataMessage data) async {
     final from = data.from;
-    if (from == null) return null;
+    if (from == null) {
+      _log('BNK564 _buildMessage[$topicId] DROP — data.from is null '
+          'seq=${data.seq}');
+      return null;
+    }
     final appUserId = await config.resolveAppUserId(from);
-    if (appUserId == null) return null;
+    if (appUserId == null) {
+      _log('BNK564 _buildMessage[$topicId] DROP — resolveAppUserId($from) '
+          'returned null seq=${data.seq}');
+      return null;
+    }
+    _log('BNK564 _buildMessage[$topicId] OK from=$from -> $appUserId '
+        'seq=${data.seq}');
 
     final author = types.User(id: appUserId);
     final msgId = data.seq?.toString() ?? '';
@@ -794,20 +820,43 @@ class TicTacModule {
   /// surface it like a joined-topic message, plus an onTopicUpdated carrying
   /// refreshed unread/touched.
   void _handleContactUpdate(tinode.ContactUpdateEvent ev) {
-    if (ev.what != 'msg') return;
     final topicName = ev.contact.topic;
-    if (topicName == null) return;
-    if (topicName == 'me' || topicName == 'fnd' || topicName == 'sys') return;
+    if (ev.what != 'msg') {
+      _log('BNK564 _handleContactUpdate[$topicName] SKIP — what=${ev.what} '
+          '(only msg is handled here)');
+      return;
+    }
+    if (topicName == null) {
+      _log('BNK564 _handleContactUpdate: SKIP — null topic name');
+      return;
+    }
+    if (topicName == 'me' || topicName == 'fnd' || topicName == 'sys') {
+      _log('BNK564 _handleContactUpdate[$topicName] SKIP — system topic');
+      return;
+    }
     // Joined topics already deliver via their live data stream.
-    if (_activeTopics.containsKey(topicName)) return;
+    if (_activeTopics.containsKey(topicName)) {
+      _log('BNK564 _handleContactUpdate[$topicName] SKIP — joined topic, '
+          'will deliver via live data stream');
+      return;
+    }
+    _log('BNK564 _handleContactUpdate[$topicName] → _fetchAndDeliverLatest');
     _fetchAndDeliverLatest(topicName, ev.contact);
   }
 
   Future<void> _fetchAndDeliverLatest(
       String topicName, tinode.TopicSubscription sub) async {
+    _log('BNK564 _fetchAndDeliverLatest[$topicName] entered');
     final t = _tinode;
-    if (t == null) return;
-    if (!_fetchingTopics.add(topicName)) return; // already in flight
+    if (t == null) {
+      _log('BNK564 _fetchAndDeliverLatest[$topicName] ABORT — _tinode null');
+      return;
+    }
+    if (!_fetchingTopics.add(topicName)) {
+      _log('BNK564 _fetchAndDeliverLatest[$topicName] SKIP — '
+          'already in _fetchingTopics (warm or fetch in flight)');
+      return;
+    }
 
     try {
       final topic = t.getTopic(topicName);
@@ -816,17 +865,27 @@ class TicTacModule {
         null,
       );
       final msgs = topic.messages;
+      _log('BNK564 _fetchAndDeliverLatest[$topicName] subscribe OK, '
+          'topic.messages.length=${msgs.length}');
       if (msgs.isNotEmpty) {
         // Do NOT markRead — a background fetch must not advance the read
         // marker, or it would wipe the unread count.
         final msg = await _buildMessage(topicName, msgs.last);
         if (msg != null) {
+          _log('BNK564 _fetchAndDeliverLatest[$topicName] firing '
+              'onMessageReceived seq=${msgs.last.seq}');
           _fire((c) => c.onMessageReceived?.call(topicName, msg));
+        } else {
+          _log('BNK564 _fetchAndDeliverLatest[$topicName] _buildMessage '
+              'returned null — message dropped');
         }
+      } else {
+        _log('BNK564 _fetchAndDeliverLatest[$topicName] topic.messages empty '
+            '— nothing to deliver');
       }
       await topic.leave(false);
     } catch (e) {
-      _log('fetch-on-presence for $topicName failed: $e');
+      _log('BNK564 _fetchAndDeliverLatest[$topicName] EXCEPTION: $e');
     } finally {
       _fetchingTopics.remove(topicName);
     }
@@ -880,30 +939,53 @@ class TicTacModule {
   /// never generate a live `msg` presence. Skips joined topics (joinTopic
   /// already replays their history).
   Future<void> _warmTopic(String topicName, {int scan = 30}) async {
+    _log('BNK564 _warmTopic[$topicName] entered scan=$scan');
     final t = _tinode;
-    if (t == null) return;
-    if (topicName == 'me' || topicName == 'fnd' || topicName == 'sys') return;
-    if (_activeTopics.containsKey(topicName)) return;
-    if (!_fetchingTopics.add(topicName)) return; // in flight (warm or live fetch)
+    if (t == null) {
+      _log('BNK564 _warmTopic[$topicName] ABORT — _tinode null');
+      return;
+    }
+    if (topicName == 'me' || topicName == 'fnd' || topicName == 'sys') {
+      _log('BNK564 _warmTopic[$topicName] SKIP — system topic');
+      return;
+    }
+    if (_activeTopics.containsKey(topicName)) {
+      _log('BNK564 _warmTopic[$topicName] SKIP — already joined');
+      return;
+    }
+    if (!_fetchingTopics.add(topicName)) {
+      _log('BNK564 _warmTopic[$topicName] SKIP — already in _fetchingTopics '
+          '(another warm or fetch is in flight)');
+      return; // in flight (warm or live fetch)
+    }
 
     // seq -> message, deduped. Collect from the data stream (frames can land
     // just after the subscribe ctrl resolves) and from the topic's cache.
     final collected = <int, tinode.DataMessage>{};
     try {
       final topic = t.getTopic(topicName);
+      _log('BNK564 _warmTopic[$topicName] getTopic OK '
+          'topic.messages.length(pre-sub)=${topic.messages.length}');
       final dataSub = topic.onData.listen((d) {
         final seq = d?.seq;
+        _log('BNK564 _warmTopic[$topicName] onData frame seq=$seq from=${d?.from}');
         if (seq != null) collected[seq] = d!;
       });
       try {
         // withData(null,null,limit) = latest `scan` messages. (withLaterData is
         // a no-op until a topic has loaded data, so it can't do a fresh fetch.)
+        _log('BNK564 _warmTopic[$topicName] subscribing with withData(null,null,$scan)');
         await topic.subscribe(
           tinode.MetaGetBuilder(topic).withData(null, null, scan).build(),
           null,
         );
-        // Let the {data} frames drain — they can arrive after the ctrl.
-        await Future<void>.delayed(const Duration(milliseconds: 600));
+        _log('BNK564 _warmTopic[$topicName] subscribe ctrl returned, '
+            'waiting 3000ms for data frames…');
+        // Bumped from 600ms while investigating BNK-564 — if data arrives in
+        // the extra window the original timeout was the bug.
+        await Future<void>.delayed(const Duration(milliseconds: 3000));
+        _log('BNK564 _warmTopic[$topicName] wait done '
+            'topic.messages.length(post-wait)=${topic.messages.length}');
       } finally {
         await dataSub.cancel();
       }
@@ -913,14 +995,16 @@ class TicTacModule {
       }
       await topic.leave(false);
     } catch (e) {
-      _log('warm topic $topicName failed: $e');
+      _log('BNK564 _warmTopic[$topicName] EXCEPTION: $e');
     } finally {
       _fetchingTopics.remove(topicName);
     }
 
     final all = collected.values.toList()
       ..sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-    _log('warm $topicName: ${all.length} message(s) fetched');
+    _log('BNK564 _warmTopic[$topicName] fetch complete — ${all.length} '
+        'message(s) collected '
+        'seqs=${all.map((d) => d.seq).toList()}');
 
     // Ascending by seq, so the last assignment of each kind is the newest.
     tinode.DataMessage? lastText;
