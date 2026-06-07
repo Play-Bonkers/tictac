@@ -205,7 +205,12 @@ class PresMessage {
 
   static PresMessage fromMessage(Map<String, dynamic> msg) {
     return PresMessage(
-      topic: msg['msg'],
+      // BNK-568: was msg['msg'] — a long-standing typo that nulled
+      // `topic` on every pres frame. The downstream cache lookup
+      // (`_cacheManager.get('topic', pres.topic ?? '')`) then always
+      // missed, so `me.routePres` never fired and presence was
+      // invisible end-to-end.
+      topic: msg['topic'],
       src: msg['src'],
       what: msg['what'],
       seq: msg['seq'],
