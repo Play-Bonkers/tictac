@@ -416,18 +416,24 @@ class TicTacModule {
     }
 
     final topic = _tinode!.getTopic(topicId);
+    tinode.MetaGetBuilder builder;
+    try {
+      builder = tinode.MetaGetBuilder(topic)
+          .withLaterData(config.recentMessages)
+          .withLaterSub(null);
+    } on Error {
+      builder = tinode.MetaGetBuilder(topic)
+          .withData(null, null, config.recentMessages)
+          .withSub(null, null, null);
+    }
     if (!topic.isSubscribed) {
-      tinode.MetaGetBuilder builder;
-      try {
-        builder = tinode.MetaGetBuilder(topic)
-            .withLaterData(config.recentMessages)
-            .withLaterSub(null);
-      } on Error {
-        builder = tinode.MetaGetBuilder(topic)
-            .withData(null, null, config.recentMessages)
-            .withSub(null, null, null);
-      }
       await topic.subscribe(builder.build(), null);
+    } else {
+      // Topic was subscribed elsewhere (e.g. createDirectTopic on bootup)
+      // without a data fetch, so the local cache is empty. Pull history
+      // now — otherwise the first joinTopic for this id hands back an
+      // empty chat even though the server has messages.
+      await topic.getMeta(builder.build());
     }
 
     final active = _ActiveTopic(
@@ -1164,6 +1170,22 @@ class _ActiveTopic {
     }
   }
 
+  /// Highest read marker across non-self subscribers, or 0 if none. Lets
+  /// a re-mounted UI seed its peer-read state synchronously instead of
+  /// waiting for the next live `{info what=read}` from the server.
+  int peerReadSeq() {
+    var max = 0;
+    final t = module._tinode;
+    final selfId = t != null && t.isAuthenticated ? t.userId : null;
+    for (final sub in _topic.subscribers.values) {
+      final r = sub.read;
+      if (r == null || r <= 0) continue;
+      if (selfId != null && sub.user == selfId) continue;
+      if (r > max) max = r;
+    }
+    return max;
+  }
+
   void attach() {
     _dataSub?.cancel();
     _dataSub = _topic.onData.listen(_onData);
@@ -1385,4 +1407,7 @@ class _TopicHandleImpl implements TopicHandle {
 
   @override
   Future<void> leave() => _active.leave();
+
+  @override
+  int peerReadSeq() => _active.peerReadSeq();
 }

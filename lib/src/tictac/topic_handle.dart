@@ -47,4 +47,9 @@ abstract class TopicHandle {
   /// are no-ops, no callbacks fire for this topic, and the handle should
   /// be discarded.
   Future<void> leave();
+
+  /// Highest seq the peer (anyone but us) has read, or 0 if unknown. UIs
+  /// rebuilding on mount can use this to seed "seen" state synchronously
+  /// instead of waiting for the next live `{info what=read}`.
+  int peerReadSeq();
 }
