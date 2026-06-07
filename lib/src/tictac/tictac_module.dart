@@ -763,6 +763,31 @@ class TicTacModule {
     _knownTopicIds
       ..clear()
       ..addAll(freshIds);
+
+    // BNK-568: seed peer online status from the subscription metadata.
+    // Tinode populates `sub.online` from the peer's current session state
+    // at the time of the meta query (for p2p topics this means "the other
+    // party is online"). Re-fire it whenever subs update — for the
+    // single-phone "cold mount with peer already online/offline" case it's
+    // the only signal we get; for the "peer transitions live" case it's
+    // a no-op overwritten by the {pres} frame's onUserPresenceChanged.
+    for (final sub in subs) {
+      final topicName = sub.topic;
+      if (topicName == null) continue;
+      // Only p2p user topics carry meaningful per-peer presence. Skip
+      // me/fnd/sys and any group topics (grpXXX) where `online` means
+      // something else.
+      if (!topicName.startsWith('usr')) continue;
+      final online = sub.online == true;
+      // Resolve fire-and-forget; the resolver may be async (TAGS hop) and
+      // we don't want to serialize all subs on a single round trip.
+      config.resolveAppUserId(topicName).then((appUserId) {
+        if (appUserId == null) return;
+        _fire((c) => c.onUserPresenceChanged?.call(appUserId, online));
+      }).catchError((e) {
+        _log('BNK564 _handleSubsUpdated: seed resolve error topic=$topicName: $e');
+      });
+    }
   }
 
   /// Build the app-facing message from a Tinode data message. Shared by the
