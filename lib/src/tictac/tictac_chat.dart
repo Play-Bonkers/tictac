@@ -231,6 +231,15 @@ class _TicTacChatState extends State<TicTacChat> {
   TopicHandle? _topic;
   String? _lastReadMessageId;
 
+  // Highest seq the peer has read. The `seen` upgrade lives only here in
+  // this widget's list; Tinode replays `{data}` frames (reconnect catch-up,
+  // resubscribe, joinTopic cache replay) and _buildMessage stamps
+  // `Status.sent` on every own-message, which would clobber the seen
+  // state. Caching the read marker lets _handleMessage re-apply seen on
+  // every insert/replace, and lets _handleRead survive races where the
+  // read marker arrives before its corresponding data message.
+  int _peerReadSeq = 0;
+
   // Our callback bag — registered on the module via addCallbacks at
   // mount and removed on dispose. Holding by reference (not identity-
   // hashed) so removal hits the exact same instance.
@@ -269,7 +278,14 @@ class _TicTacChatState extends State<TicTacChat> {
   }
 
   Future<void> _joinTopic() async {
-    _topic = await widget.module.joinTopic(widget.topicId);
+    final t = await widget.module.joinTopic(widget.topicId);
+    if (_disposed) return;
+    _topic = t;
+    // Seed the peer-read marker from the topic's cached subscribers so
+    // re-mounted chats can stamp Status.seen on replayed own-messages
+    // without waiting for a live {info what=read}.
+    final seq = t.peerReadSeq();
+    if (seq > _peerReadSeq) _handleRead(seq);
   }
 
   @override
@@ -298,6 +314,8 @@ class _TicTacChatState extends State<TicTacChat> {
 
   void _handleMessage(types.Message msg) {
     if (_disposed) return;
+
+    msg = _applyPeerRead(msg);
 
     // Replace optimistic placeholder, if any.
     if (msg.author.id == _user.id) {
@@ -344,6 +362,7 @@ class _TicTacChatState extends State<TicTacChat> {
   // are skipped until their server echo replaces them.
   void _handleRead(int readSeq) {
     if (_disposed) return;
+    if (readSeq > _peerReadSeq) _peerReadSeq = readSeq;
     var changed = false;
     for (var i = 0; i < _messages.length; i++) {
       final m = _messages[i];
@@ -355,6 +374,18 @@ class _TicTacChatState extends State<TicTacChat> {
       changed = true;
     }
     if (changed) setState(() {});
+  }
+
+  // Stamp `Status.seen` on own messages already covered by the peer's
+  // read marker. Called on every insert/replace so re-deliveries and
+  // late-arriving data frames don't downgrade to `Status.sent`.
+  types.Message _applyPeerRead(types.Message msg) {
+    if (_peerReadSeq == 0) return msg;
+    if (msg.author.id != _user.id) return msg;
+    if (msg.status == types.Status.seen) return msg;
+    final seq = int.tryParse(msg.id);
+    if (seq == null || seq > _peerReadSeq) return msg;
+    return msg.copyWith(status: types.Status.seen);
   }
 
   void _handleMemberAdded(types.User member) {
