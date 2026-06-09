@@ -17,6 +17,17 @@ import 'package:tictac/src/tictac/voice/voice_callbacks.dart';
 import 'package:tictac/src/tictac/voice/voice_module.dart';
 import 'package:tictac/src/tictac/voice/voice_session.dart';
 
+/// Default Tinode access mode for a plain group member: Join, Read,
+/// Write, Presence. Admin promotion (Approve, Share, etc.) is a separate
+/// future surface; for now every invite lands here.
+const String _kDefaultMemberMode = 'JRWP';
+
+/// Tinode "eject" pattern: there is no dedicated eject API on
+/// [tinode.Topic]. Setting access mode to None (`'N'`) removes the user
+/// from the topic and triggers the server-side `{pres what=acs}` that
+/// fires [TicTacCallbacks.onMemberRemoved] on every other subscriber.
+const String _kEjectMode = 'N';
+
 /// Entry point for TicTac.
 ///
 /// Stateless on the chat side: every event surfaces through
@@ -340,19 +351,38 @@ class TicTacModule {
   }
 
   /// Create a group topic with the given display name + initial members.
+  ///
+  /// Bulk-resolves [memberAppUserIds] to Tinode user ids via
+  /// [TicTacConfig.resolveTinodeUserIds]. Members that fail to resolve
+  /// are dropped with a log line — the group is created with whoever
+  /// could be resolved. Throws [StateError] if no bulk resolver is
+  /// configured.
   Future<tictac_models.Topic> createGroupTopic(
     String name,
     List<String> memberAppUserIds,
   ) async {
     await _ensureConnected();
-    final tinodeUserIds = <String>[];
-    for (final appUserId in memberAppUserIds) {
-      // Reverse: we have appUserId, want tinodeUid. The host's resolver
-      // goes the other way; for group creation we have to ask Tinode via
-      // a fnd lookup. Punt for now — this code path isn't covered by the
-      // host's resolver contract. Document as a known gap.
-      tinodeUserIds.add(appUserId);
+    final resolver = config.resolveTinodeUserIds;
+    if (resolver == null) {
+      throw StateError(
+          'createGroupTopic requires TicTacConfig.resolveTinodeUserIds');
     }
+    final mappings = memberAppUserIds.isEmpty
+        ? const <String, String>{}
+        : await resolver(memberAppUserIds);
+    final resolved = <String>[];     // appUserIds that mapped successfully
+    final tinodeIds = <String>[];    // tinodeUserIds, parallel to resolved
+    for (final appUserId in memberAppUserIds) {
+      final tinodeUid = mappings[appUserId];
+      if (tinodeUid == null) {
+        _log('createGroupTopic: dropping member $appUserId — no tinode '
+            'mapping');
+        continue;
+      }
+      resolved.add(appUserId);
+      tinodeIds.add(tinodeUid);
+    }
+
     final newTopic = _tinode!.newTopic();
     final setParams = tinode.SetParams()
       ..desc = (tinode.TopicDescription()..public = {'fn': name});
@@ -360,18 +390,18 @@ class TicTacModule {
       tinode.MetaGetBuilder(newTopic).build(),
       setParams,
     );
-    for (final userId in tinodeUserIds) {
+    for (final tinodeUid in tinodeIds) {
       try {
-        await newTopic.invite(userId, 'JRWPS');
+        await newTopic.invite(tinodeUid, _kDefaultMemberMode);
       } catch (e) {
-        _log('Failed to invite $userId: $e');
+        _log('createGroupTopic: invite $tinodeUid failed: $e');
       }
     }
     return tictac_models.Topic(
       id: newTopic.name!,
       name: name,
       type: TopicType.group,
-      memberAppUserIds: memberAppUserIds,
+      memberAppUserIds: resolved,
     );
   }
 
@@ -1373,6 +1403,41 @@ class _ActiveTopic {
       module._log('Topic.leave swallowed cast: $e');
     }
   }
+
+  Future<void> invite(String appUserId) async {
+    final tinodeUid = await _resolveOne(appUserId);
+    await _topic.invite(tinodeUid, _kDefaultMemberMode);
+  }
+
+  Future<void> eject(String appUserId) async {
+    final tinodeUid = await _resolveOne(appUserId);
+    await _topic.invite(tinodeUid, _kEjectMode);
+  }
+
+  Future<void> setName(String name) async {
+    await _topic.setMeta(tinode.SetParams()
+      ..desc = (tinode.TopicDescription()..public = {'fn': name}));
+  }
+
+  Future<void> setPhoto(String url) async {
+    await _topic.setMeta(tinode.SetParams()
+      ..desc = (tinode.TopicDescription()..public = {'photo': url}));
+  }
+
+  Future<String> _resolveOne(String appUserId) async {
+    final resolver = module.config.resolveTinodeUserIds;
+    if (resolver == null) {
+      throw StateError(
+          'invite/eject require TicTacConfig.resolveTinodeUserIds');
+    }
+    final mappings = await resolver([appUserId]);
+    final tinodeUid = mappings[appUserId];
+    if (tinodeUid == null) {
+      throw ArgumentError.value(
+          appUserId, 'appUserId', 'cannot resolve to a Tinode user id');
+    }
+    return tinodeUid;
+  }
 }
 
 /// Thin facade — delegates everything to `_ActiveTopic`. Exists so the
@@ -1410,4 +1475,16 @@ class _TopicHandleImpl implements TopicHandle {
 
   @override
   int peerReadSeq() => _active.peerReadSeq();
+
+  @override
+  Future<void> invite(String appUserId) => _active.invite(appUserId);
+
+  @override
+  Future<void> eject(String appUserId) => _active.eject(appUserId);
+
+  @override
+  Future<void> setName(String name) => _active.setName(name);
+
+  @override
+  Future<void> setPhoto(String url) => _active.setPhoto(url);
 }
