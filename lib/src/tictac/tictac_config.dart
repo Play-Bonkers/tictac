@@ -79,6 +79,18 @@ class TicTacConfig {
   /// surfaced, no member added, no presence emitted).
   final Future<String?> Function(String tinodeUserId) resolveAppUserId;
 
+  /// Bulk forward resolution: maps a list of app user ids to their
+  /// Tinode user ids. Returns a map keyed by the input id; missing
+  /// entries (host can't resolve) are absent from the result, NOT
+  /// present-with-null. Used by group creation and roster mutation
+  /// to avoid N round trips.
+  ///
+  /// Optional — only required if the host calls
+  /// [TicTacModule.createGroupTopic] or the group-membership methods on
+  /// [TopicHandle] (invite/eject). Throws if invoked unset.
+  final Future<Map<String, String>> Function(List<String> appUserIds)?
+      resolveTinodeUserIds;
+
   /// Mints a LiveKit access token for a topic. The host owns the HTTP
   /// call — tictac doesn't know about TAGS, Lambda endpoints, or
   /// Firebase. Required only if the host calls
@@ -136,6 +148,7 @@ class TicTacConfig {
     this.backgroundReconnectThreshold = const Duration(seconds: 30),
     required this.authTokenProvider,
     required this.resolveAppUserId,
+    this.resolveTinodeUserIds,
     this.mintVoiceToken,
     this.provision = false,
   });

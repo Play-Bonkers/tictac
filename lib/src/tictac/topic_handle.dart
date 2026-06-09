@@ -52,4 +52,35 @@ abstract class TopicHandle {
   /// rebuilding on mount can use this to seed "seen" state synchronously
   /// instead of waiting for the next live `{info what=read}`.
   int peerReadSeq();
+
+  /// Invite an app user to this topic with default member access. Resolves
+  /// the appUserId to a Tinode user id via
+  /// [TicTacConfig.resolveTinodeUserIds]; throws [StateError] if no
+  /// resolver is configured or [ArgumentError] if the id can't be
+  /// resolved. The corresponding [TicTacCallbacks.onMemberAdded] fires
+  /// once the server confirms.
+  ///
+  /// Default access mode is `JRWP` (Join, Read, Write, Presence) — plain
+  /// member. To promote to admin or change roles later, use a future
+  /// `updateMode` method (not yet exposed).
+  Future<void> invite(String appUserId);
+
+  /// Eject an app user from this topic. Resolves the appUserId to a
+  /// Tinode user id; throws like [invite]. Implemented as
+  /// `invite(appUserId, mode: 'N')` since the underlying Tinode SDK
+  /// doesn't expose a dedicated eject — setting access mode to None is
+  /// the eject pattern. [TicTacCallbacks.onMemberRemoved] fires once the
+  /// server confirms.
+  Future<void> eject(String appUserId);
+
+  /// Update the topic's display name (Tinode `desc.public.fn`). Visible
+  /// to all members. [TicTacCallbacks.onTopicUpdated] fires for every
+  /// member once the server confirms.
+  Future<void> setName(String name);
+
+  /// Update the topic's photo URL (Tinode `desc.public.photo`). Tinode
+  /// treats `public` as opaque JSON — this method only stores the URL,
+  /// not bytes. Upload pipeline (pick / resize / upload) is the caller's
+  /// responsibility.
+  Future<void> setPhoto(String url);
 }
