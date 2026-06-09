@@ -355,21 +355,23 @@ class TicTacModule {
   /// Bulk-resolves [memberAppUserIds] to Tinode user ids via
   /// [TicTacConfig.resolveTinodeUserIds]. Members that fail to resolve
   /// are dropped with a log line — the group is created with whoever
-  /// could be resolved. Throws [StateError] if no bulk resolver is
-  /// configured.
+  /// could be resolved. Throws [StateError] if members are passed but
+  /// no bulk resolver is configured. An empty member list is allowed
+  /// without a resolver (owner-only group / test setup).
   Future<tictac_models.Topic> createGroupTopic(
     String name,
     List<String> memberAppUserIds,
   ) async {
     await _ensureConnected();
     final resolver = config.resolveTinodeUserIds;
-    if (resolver == null) {
+    if (memberAppUserIds.isNotEmpty && resolver == null) {
       throw StateError(
-          'createGroupTopic requires TicTacConfig.resolveTinodeUserIds');
+          'createGroupTopic with members requires '
+          'TicTacConfig.resolveTinodeUserIds');
     }
     final mappings = memberAppUserIds.isEmpty
         ? const <String, String>{}
-        : await resolver(memberAppUserIds);
+        : await resolver!(memberAppUserIds);
     final resolved = <String>[];     // appUserIds that mapped successfully
     final tinodeIds = <String>[];    // tinodeUserIds, parallel to resolved
     for (final appUserId in memberAppUserIds) {
