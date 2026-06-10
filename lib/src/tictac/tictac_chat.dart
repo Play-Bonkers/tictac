@@ -270,7 +270,13 @@ class _TicTacChatState extends State<TicTacChat> {
         if (topicId == widget.topicId) _markTyping(appUserId);
       },
       onMessageRead: (topicId, appUserId, seq) {
-        if (topicId == widget.topicId) _handleRead(seq);
+        // _peerReadSeq drives the "seen" tick on OWN messages, which
+        // only matters when the reader is NOT us. tictac now fires
+        // onMessageRead for self reads as well (so host topic-list
+        // caches can track "I've caught up"); filter those out here.
+        if (topicId != widget.topicId) return;
+        if (appUserId == widget.module.config.appUserId) return;
+        _handleRead(seq);
       },
     );
     widget.module.addCallbacks(_ownCallbacks);
