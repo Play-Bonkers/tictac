@@ -95,10 +95,25 @@ class TicTacCallbacks {
   final void Function(String topicId, String appUserId)? onTypingStarted;
 
   /// [appUserId] has read messages in [topicId] up to and including [seq]
-  /// (read markers are cumulative). Use this to mark your own sent messages
-  /// with `seq <= [seq]` as "seen" in the UI. Fires for peers only — your
-  /// own read markers are not re-surfaced here. Delivered both live (Tinode
-  /// `{info what=read}`) and on join (the peer's subscription `read` value).
+  /// (read markers are cumulative).
+  ///
+  /// Fires for **all** readers — including the current user. Two
+  /// distinct downstream uses:
+  ///   * `appUserId == self`: drives "I've read up to here" state (host
+  ///     topic-list caches, unread badges).
+  ///   * `appUserId != self`: drives "seen" tick on own messages
+  ///     (`seq <= readSeq` → upgrade `Status.sent` → `Status.seen`).
+  ///
+  /// Consumers that only care about one direction must filter on
+  /// `appUserId` themselves.
+  ///
+  /// Delivered through three paths:
+  ///   * Live `{info what=read}` from any session (own or peer's other
+  ///     devices, or a peer entirely)
+  ///   * Subscription `read` value at join time (via `onMetaSub`)
+  ///   * Synchronously after a successful `TopicHandle.markRead(...)` —
+  ///     Tinode does not echo own reads back to the same session, so
+  ///     tictac fires this locally so state advances immediately
   final void Function(String topicId, String appUserId, int seq)?
       onMessageRead;
 

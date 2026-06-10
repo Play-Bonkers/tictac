@@ -921,32 +921,68 @@ class TicTacModule {
       return;
     }
 
+    var subscribedHere = false;
+    // {pres what=msg} is the trigger and {data} for the same seq is
+    // racing in on the same WS — frequently it lands AFTER getMeta's
+    // {ctrl} ack. Without a listener + brief wait, we'd read
+    // topic.messages.last before routeData puts the new frame in
+    // cache, and surface the previous seq instead of the one the user
+    // just sent. Mirrors _warmTopic's pattern with a much shorter wait.
+    final collected = <int, tinode.DataMessage>{};
     try {
       final topic = t.getTopic(topicName);
-      await topic.subscribe(
-        tinode.MetaGetBuilder(topic).withData(null, null, 1).build(),
-        null,
-      );
-      final msgs = topic.messages;
-      _log('BNK564 _fetchAndDeliverLatest[$topicName] subscribe OK, '
-          'topic.messages.length=${msgs.length}');
-      if (msgs.isNotEmpty) {
+      final dataSub = topic.onData.listen((d) {
+        final seq = d?.seq;
+        if (seq != null) collected[seq] = d!;
+      });
+      try {
+        final query =
+            tinode.MetaGetBuilder(topic).withData(null, null, 1).build();
+        if (topic.isSubscribed) {
+          // Someone else owns the sub (e.g. createDirectTopic at bootup).
+          // The SDK rejects re-subscribe; pull history via getMeta and
+          // leave the existing sub alone.
+          _log('BNK564 _fetchAndDeliverLatest[$topicName] already subscribed — '
+              'getMeta(withData null,null,1)');
+          await topic.getMeta(query);
+        } else {
+          await topic.subscribe(query, null);
+          subscribedHere = true;
+        }
+        // Drain late-arriving {data} frames for this seq before reading.
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      } finally {
+        await dataSub.cancel();
+      }
+      // Merge live captures with topic cache so a frame is picked up
+      // whether routeData or our listener saw it first.
+      for (final d in topic.messages) {
+        final seq = d.seq;
+        if (seq != null) collected[seq] = d;
+      }
+      _log('BNK564 _fetchAndDeliverLatest[$topicName] ctrl OK, '
+          'collected=${collected.length} cache=${topic.messages.length}');
+      if (collected.isNotEmpty) {
         // Do NOT markRead — a background fetch must not advance the read
         // marker, or it would wipe the unread count.
-        final msg = await _buildMessage(topicName, msgs.last);
+        final latest = collected.values.reduce(
+            (a, b) => (a.seq ?? 0) >= (b.seq ?? 0) ? a : b);
+        final msg = await _buildMessage(topicName, latest);
         if (msg != null) {
           _log('BNK564 _fetchAndDeliverLatest[$topicName] firing '
-              'onMessageReceived seq=${msgs.last.seq}');
+              'onMessageReceived seq=${latest.seq}');
           _fire((c) => c.onMessageReceived?.call(topicName, msg));
         } else {
           _log('BNK564 _fetchAndDeliverLatest[$topicName] _buildMessage '
               'returned null — message dropped');
         }
       } else {
-        _log('BNK564 _fetchAndDeliverLatest[$topicName] topic.messages empty '
-            '— nothing to deliver');
+        _log('BNK564 _fetchAndDeliverLatest[$topicName] no messages — '
+            'nothing to deliver');
       }
-      await topic.leave(false);
+      if (subscribedHere) {
+        await topic.leave(false);
+      }
     } catch (e) {
       _log('BNK564 _fetchAndDeliverLatest[$topicName] EXCEPTION: $e');
     } finally {
@@ -1025,10 +1061,12 @@ class TicTacModule {
     // seq -> message, deduped. Collect from the data stream (frames can land
     // just after the subscribe ctrl resolves) and from the topic's cache.
     final collected = <int, tinode.DataMessage>{};
+    var subscribedHere = false;
     try {
       final topic = t.getTopic(topicName);
       _log('BNK564 _warmTopic[$topicName] getTopic OK '
-          'topic.messages.length(pre-sub)=${topic.messages.length}');
+          'topic.messages.length(pre-sub)=${topic.messages.length} '
+          'isSubscribed=${topic.isSubscribed}');
       final dataSub = topic.onData.listen((d) {
         final seq = d?.seq;
         _log('BNK564 _warmTopic[$topicName] onData frame seq=$seq from=${d?.from}');
@@ -1037,12 +1075,21 @@ class TicTacModule {
       try {
         // withData(null,null,limit) = latest `scan` messages. (withLaterData is
         // a no-op until a topic has loaded data, so it can't do a fresh fetch.)
-        _log('BNK564 _warmTopic[$topicName] subscribing with withData(null,null,$scan)');
-        await topic.subscribe(
-          tinode.MetaGetBuilder(topic).withData(null, null, scan).build(),
-          null,
-        );
-        _log('BNK564 _warmTopic[$topicName] subscribe ctrl returned, '
+        final query =
+            tinode.MetaGetBuilder(topic).withData(null, null, scan).build();
+        if (topic.isSubscribed) {
+          // Someone already owns the sub (e.g. createDirectTopic at
+          // bootup). Don't re-subscribe — the SDK rejects that. Just
+          // pull history via getMeta and leave the existing sub alone.
+          _log('BNK564 _warmTopic[$topicName] already subscribed — '
+              'getMeta(withData null,null,$scan)');
+          await topic.getMeta(query);
+        } else {
+          _log('BNK564 _warmTopic[$topicName] subscribing with withData(null,null,$scan)');
+          await topic.subscribe(query, null);
+          subscribedHere = true;
+        }
+        _log('BNK564 _warmTopic[$topicName] ctrl returned, '
             'waiting 3000ms for data frames…');
         // Bumped from 600ms while investigating BNK-564 — if data arrives in
         // the extra window the original timeout was the bug.
@@ -1056,7 +1103,12 @@ class TicTacModule {
         final seq = d.seq;
         if (seq != null) collected[seq] = d;
       }
-      await topic.leave(false);
+      // Only leave if we did the subscribing in this call. Tearing
+      // down a sub owned by another caller (createDirectTopic, joinTopic)
+      // would silently break their live data flow.
+      if (subscribedHere) {
+        await topic.leave(false);
+      }
     } catch (e) {
       _log('BNK564 _warmTopic[$topicName] EXCEPTION: $e');
     } finally {
@@ -1278,9 +1330,13 @@ class _ActiveTopic {
         final seq = info.seq;
         if (seq == null) return;
         module.config.resolveAppUserId(from).then((appUserId) {
-          // Ignore our own read markers — those track what *we've* read of
-          // the peer's messages, not whether the peer read ours.
-          if (appUserId == null || appUserId == module.config.appUserId) return;
+          if (appUserId == null) return;
+          // Fires for ALL readers including the current user. Tinode
+          // cross-device sync echoes our own reads to other sessions of
+          // the same user, and consumers that need to track "I've read
+          // up to here" (host topic-list caches) want both directions.
+          // Consumers that distinguish peer-read from self-read must
+          // filter on appUserId.
           module._fire((c) => c.onMessageRead?.call(topicId, appUserId, seq));
         }).catchError((e) {
           module._log('topic($topicId): read resolve error: $e');
@@ -1317,13 +1373,12 @@ class _ActiveTopic {
     if (online != null) {
       module._fire((c) => c.onTopicPresenceChanged?.call(topicId, appUserId, online));
     }
-    // Surface the subscriber's read marker so "seen" state is correct on
-    // join (live updates arrive separately via onInfo what=read). Skip our
-    // own subscription — that read value is what we've read, not the peer.
+    // Surface the subscriber's read marker so "seen" state (own
+    // messages) and "I've caught up" state (self) are correct on
+    // join. Live updates arrive separately via onInfo what=read.
+    // Fires for self too — consumers distinguish on appUserId.
     final readSeq = sub.read;
-    if (readSeq != null &&
-        readSeq > 0 &&
-        appUserId != module.config.appUserId) {
+    if (readSeq != null && readSeq > 0) {
       module._fire((c) => c.onMessageRead?.call(topicId, appUserId, readSeq));
     }
   }
@@ -1363,6 +1418,15 @@ class _ActiveTopic {
     final seq = int.tryParse(messageId);
     if (seq == null) return;
     _topic.noteRead(seq);
+    // Tinode does not echo our own `{note what=read}` back to the same
+    // session, and the server-side meta sub refresh that would update
+    // cont.read is asynchronous and may never reach us in this session.
+    // Fire onMessageRead locally so consumers (TicTacChat, host topic-
+    // list caches) can advance their "I've read up to here" state right
+    // now. The callback receives our own appUserId; consumers that
+    // distinguish peer-read from self-read must filter on the readerId.
+    module._fire((c) => c.onMessageRead?.call(
+        topicId, module.config.appUserId, seq));
   }
 
   Future<void> setTyping(bool isTyping) async {
