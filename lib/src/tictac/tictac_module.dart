@@ -110,6 +110,12 @@ class TicTacModule {
       BehaviorSubject.seeded(TicTacConnectionState.disconnected);
   TicTacConnectionState get currentConnectionState => _connectionState.value;
 
+  // Device token for push notifications. Stored here so we can re-send
+  // it on every (re)connect — Tinode's `{hi}` packet carries the
+  // device token, and a fresh socket starts over without it. Empty
+  // string clears upstream; null means "host never set one yet."
+  String? _pendingDeviceToken;
+
   // Heartbeat
   Timer? _heartbeatTimer;
   Timer? _pongTimer;
@@ -223,6 +229,19 @@ class TicTacModule {
       await _authenticate();
       _log('Authenticated as ${_tinode!.userId}');
 
+      // Replay any device token set before connection (or carried across
+      // a reconnect). Failing here doesn't block the rest of the
+      // bring-up; pushes just won't fire for this session, and the host
+      // will retry on next onTokenRefresh / app launch.
+      if (_pendingDeviceToken != null) {
+        try {
+          await _tinode!.setDeviceToken(_pendingDeviceToken!);
+          _log('Device token re-applied on connect');
+        } catch (e) {
+          _log('setDeviceToken on connect failed: $e');
+        }
+      }
+
       final me = _tinode!.getMeTopic();
 
       _onPressSub?.cancel();
@@ -320,6 +339,34 @@ class TicTacModule {
   void dispose() {
     disconnect();
     _connectionState.close();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Device token (push notifications)
+  // ---------------------------------------------------------------------------
+
+  /// Register a push notification device token with Tinode.
+  ///
+  /// The token is sent in Tinode's `{hi}` packet and identifies this
+  /// device to whatever push adapter Tinode is configured with (FCM,
+  /// tnpg, etc.). Stored and re-sent on every (re)connect — a fresh
+  /// socket starts a new session without the token, so the host doesn't
+  /// have to track connection state to keep push registration alive.
+  ///
+  /// Pass `null` or an empty string to clear the token upstream (e.g.
+  /// on logout). Calling this before [connect] just stores the token;
+  /// it'll be applied as part of the next connect.
+  Future<void> setDeviceToken(String? token) async {
+    final normalized = (token == null || token.isEmpty) ? '' : token;
+    _pendingDeviceToken = normalized;
+    if (_tinode != null && _tinode!.isConnected) {
+      try {
+        await _tinode!.setDeviceToken(normalized);
+      } catch (e) {
+        _log('setDeviceToken live update failed: $e');
+        rethrow;
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
