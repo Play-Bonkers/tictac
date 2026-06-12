@@ -1452,7 +1452,13 @@ class _ActiveTopic {
     Map<String, dynamic> payload, {
     String? fallbackText,
   }) async {
+    // `txt` makes the content valid Drafty (the format Tinode expects).
+    // Without it, Tinode's drafty.PlainText errors out and tnpg drops
+    // the entire push silently — recipients never see a notification.
+    // Receiving clients still parse customType/payload/fallbackText at
+    // the top level; `txt` is additive and ignored by them.
     final content = {
+      'txt': fallbackText ?? '',
       'customType': customType,
       'payload': payload,
       'fallbackText': fallbackText ?? '',
