@@ -25,10 +25,14 @@ class FutureManager {
 
     if (callbacks != null) {
       _pendingFutures.remove(id);
+      final c = callbacks.completer;
+      if (c == null || c.isCompleted) return;
       if (code >= 200 && code < 400) {
-        callbacks.completer?.complete(onOK);
+        c.complete(onOK);
       } else {
-        callbacks.completer?.completeError(Exception((errorText ?? '') + ' (' + code.toString() + ')'));
+        c.completeError(
+          Exception((errorText ?? '') + ' (' + code.toString() + ')'),
+        );
       }
     }
   }
@@ -41,7 +45,10 @@ class FutureManager {
     _pendingFutures.forEach((String key, FutureCallback featureCB) {
       if (featureCB.ts!.isBefore(expires)) {
         _loggerService.error('Promise expired ' + key.toString());
-        featureCB.completer?.completeError(exception);
+        final c = featureCB.completer;
+        if (c != null && !c.isCompleted) {
+          c.completeError(exception);
+        }
         markForRemoval.add(key);
       }
     });
@@ -59,9 +66,18 @@ class FutureManager {
   }
 
   void rejectAllFutures(int code, String reason) {
-    _pendingFutures.forEach((String key, FutureCallback cb) {
-      cb.completer?.completeError(reason);
-    });
+    // Guard each completer against being already-resolved (execFuture
+    // could have raced this on a different microtask, or a prior
+    // rejectAllFutures call could have completed it). Clear the map
+    // afterwards so a second disconnect doesn't re-walk the same
+    // entries and trip the same race.
+    for (final cb in _pendingFutures.values) {
+      final c = cb.completer;
+      if (c != null && !c.isCompleted) {
+        c.completeError(reason);
+      }
+    }
+    _pendingFutures.clear();
   }
 
   void stopCheckingExpiredFutures() {
