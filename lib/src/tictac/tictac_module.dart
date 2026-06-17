@@ -495,6 +495,7 @@ class TicTacModule {
     }
 
     final topic = _tinode!.getTopic(topicId);
+    final isGroup = tinode.Tools.isGroupTopicName(topicId);
     tinode.MetaGetBuilder builder;
     try {
       builder = tinode.MetaGetBuilder(topic)
@@ -504,6 +505,13 @@ class TicTacModule {
       builder = tinode.MetaGetBuilder(topic)
           .withData(null, null, config.recentMessages)
           .withSub(null, null, null);
+    }
+    // BNK-594: groups also need desc.public (name + photo) on the
+    // first join. Without this the chat-screen header reads
+    // topic.public as null and falls back to member-names until
+    // something else triggers a meta-desc fetch.
+    if (isGroup) {
+      builder.withDesc(null);
     }
     if (!topic.isSubscribed) {
       await topic.subscribe(builder.build(), null);
@@ -931,17 +939,18 @@ class TicTacModule {
   /// refreshed unread/touched.
   void _handleContactUpdate(tinode.ContactUpdateEvent ev) {
     final topicName = ev.contact.topic;
-    if (ev.what != 'msg') {
-      _log('BNK564 _handleContactUpdate[$topicName] SKIP — what=${ev.what} '
-          '(only msg is handled here)');
-      return;
-    }
     if (topicName == null) {
       _log('BNK564 _handleContactUpdate: SKIP — null topic name');
       return;
     }
     if (topicName == 'me' || topicName == 'fnd' || topicName == 'sys') {
       _log('BNK564 _handleContactUpdate[$topicName] SKIP — system topic');
+      return;
+    }
+    final what = ev.what;
+    if (what != 'msg') {
+      _log('BNK564 _handleContactUpdate[$topicName] SKIP — what=$what '
+          '(only msg + group upd/acs are handled here)');
       return;
     }
     // Joined topics already deliver via their live data stream.
@@ -1132,14 +1141,15 @@ class TicTacModule {
               'getMeta(withData null,null,$scan)');
           await topic.getMeta(query);
         } else {
-          _log('BNK564 _warmTopic[$topicName] subscribing with withData(null,null,$scan)');
+          _log('BNK564 _warmTopic[$topicName] subscribing with '
+              'withData(null,null,$scan)');
           await topic.subscribe(query, null);
           subscribedHere = true;
         }
         _log('BNK564 _warmTopic[$topicName] ctrl returned, '
-            'waiting 3000ms for data frames…');
-        // Bumped from 600ms while investigating BNK-564 — if data arrives in
-        // the extra window the original timeout was the bug.
+            'waiting for data frames…');
+        // Late {data} frames can arrive after the {ctrl} ack — give them
+        // a window to land before we read topic.messages.
         await Future<void>.delayed(const Duration(milliseconds: 3000));
         _log('BNK564 _warmTopic[$topicName] wait done '
             'topic.messages.length(post-wait)=${topic.messages.length}');
@@ -1150,11 +1160,15 @@ class TicTacModule {
         final seq = d.seq;
         if (seq != null) collected[seq] = d;
       }
-      // Only leave if we did the subscribing in this call. Tearing
-      // down a sub owned by another caller (createDirectTopic, joinTopic)
-      // would silently break their live data flow.
-      if (subscribedHere) {
+      // Only leave if we did the subscribing in this call AND no one
+      // joined this topic in the meantime. Tearing down a sub owned by
+      // another caller (createDirectTopic, joinTopic, OR a chat-screen
+      // mount that raced our warm) would silently break their live
+      // data flow.
+      if (subscribedHere && !_activeTopics.containsKey(topicName)) {
         await topic.leave(false);
+      } else if (subscribedHere) {
+        _log('BNK564 _warmTopic[$topicName] SKIP leave — joined during warm');
       }
     } catch (e) {
       _log('BNK564 _warmTopic[$topicName] EXCEPTION: $e');
@@ -1214,24 +1228,6 @@ class TicTacModule {
       String? displayName;
       if (sub.public != null && sub.public is Map) {
         displayName = (sub.public as Map)['fn'];
-      }
-      if (displayName == null && isGroup) {
-        try {
-          final topic = _tinode!.getTopic(topicName);
-          if (topic.public != null && topic.public is Map) {
-            displayName = (topic.public as Map)['fn'];
-          }
-          if (displayName == null) {
-            await topic.subscribe(
-              tinode.MetaGetBuilder(topic).withDesc(null).build(),
-              null,
-            );
-            if (topic.public != null && topic.public is Map) {
-              displayName = (topic.public as Map)['fn'];
-            }
-            await topic.leave(false);
-          }
-        } catch (_) {}
       }
 
       final memberIds = <String>[];

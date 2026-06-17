@@ -59,8 +59,21 @@ class AccessMode {
   /// Create new instance by passing an `AccessMode` or `Map<String, dynamic>`
   AccessMode(dynamic acs) {
     if (acs != null) {
-      _given = acs['given'] is int ? acs['given'] : AccessMode.decode(acs['given']);
-      _want = acs['want'] is int ? acs['want'] : AccessMode.decode(acs['want']);
+      // BNK-594: defensive null-coalesce. Tinode sometimes ships
+      // acs entries where one of given/want/mode is null (e.g. for a
+      // group where the user has been removed but the sub record
+      // hasn't been swept). `decode(null)` returns `null`, and these
+      // fields are non-nullable `int`, so the unguarded assignment
+      // throws and kills the entire incoming-message parse — taking
+      // out meta-desc / meta-sub processing for the whole batch.
+      _given = (acs['given'] is int
+              ? acs['given']
+              : AccessMode.decode(acs['given'])) ??
+          NONE;
+      _want = (acs['want'] is int
+              ? acs['want']
+              : AccessMode.decode(acs['want'])) ??
+          NONE;
 
       if (acs['mode'] != null) {
         if (acs['mode'] is int) {
