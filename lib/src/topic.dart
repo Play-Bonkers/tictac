@@ -224,6 +224,11 @@ class Topic {
 
       if (name != topic_names.TOPIC_ME && name != topic_names.TOPIC_FND) {
         // Add the new topic to the list of contacts maintained by the 'me' topic.
+        // Forward setParams.desc.public so the me-contact entry knows
+        // the group's name immediately — the server's subsequent
+        // {meta what=sub} push for the new contact is not guaranteed
+        // to include public, so without this echo the contact stays
+        // nameless until something else triggers a desc refresh.
         var me = _tinodeService.getTopic(topic_names.TOPIC_ME) as TopicMe?;
         if (me != null) {
           me.processMetaSub([
@@ -233,6 +238,7 @@ class Topic {
               created: ctrl.ts,
               updated: ctrl.ts,
               acs: acs,
+              public: setParams?.desc?.public,
             )
           ]);
         }

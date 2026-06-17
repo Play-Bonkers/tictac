@@ -261,22 +261,29 @@ class TinodeService {
     data.get = getParams;
 
     if (setParams != null) {
+      // SubPacketData is generated with set:null, so the null-safe
+      // writes below would silently drop every setParams field on
+      // create — including desc.public on `{sub topic="new"}`, which
+      // left the server with no group name despite the client having
+      // sent one. Materialize the container before populating it.
+      data.set ??= SetParams();
+
       if (setParams.sub != null) {
-        data.set?.sub = setParams.sub;
+        data.set!.sub = setParams.sub;
       }
 
       if (setParams.desc != null) {
         if (Tools.isNewGroupTopicName(topicName)) {
           // Full set.desc params are used for new topics only
-          data.set?.desc = setParams.desc;
+          data.set!.desc = setParams.desc;
         } else if (Tools.isP2PTopicName(topicName) && setParams.desc?.defacs != null) {
           // Use optional default permissions only.
-          data.set?.desc = TopicDescription(defacs: setParams.desc?.defacs);
+          data.set!.desc = TopicDescription(defacs: setParams.desc?.defacs);
         }
       }
 
       if (setParams.tags != null) {
-        data.set?.tags = setParams.tags;
+        data.set!.tags = setParams.tags;
       }
     }
 
