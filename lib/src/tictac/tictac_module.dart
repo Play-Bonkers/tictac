@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:flutter_chat_types/flutter_chat_types.dart' as types;
 import 'package:rxdart/rxdart.dart';
 import 'package:tictac/tinode.dart' as tinode;
+import 'package:tictac/src/models/access-mode.dart' as access_mode;
 import 'package:tictac/src/models/rest-auth-secret.dart';
 import 'package:tictac/src/tictac/tictac_callbacks.dart';
 import 'package:tictac/src/tictac/tictac_config.dart';
@@ -17,10 +18,22 @@ import 'package:tictac/src/tictac/voice/voice_callbacks.dart';
 import 'package:tictac/src/tictac/voice/voice_module.dart';
 import 'package:tictac/src/tictac/voice/voice_session.dart';
 
-/// Default Tinode access mode for a plain group member: Join, Read,
-/// Write, Presence. Admin promotion (Approve, Share, etc.) is a separate
-/// future surface; for now every invite lands here.
-const String _kDefaultMemberMode = 'JRWP';
+/// Default Tinode access mode for a plain group member:
+/// Join, Read, Write, Presence, Share.
+///
+/// The Share (`S`) bit is what lets Tinode broadcast `{pres what=acs}`
+/// roster changes to this user — without it, `notifySubChange` on the
+/// server filters by `filterIn: ModeCSharer` and only admins/owners
+/// learn that a member joined or was ejected. For Bonkers' flat
+/// friend-group model (no admin tier in the UI), every member is
+/// effectively an equal participant, so granting Sharer matches the
+/// product intent and makes mid-life onMemberAdded / onMemberRemoved
+/// reach every peer instead of only owners.
+///
+/// Side effect: every group member can invite / eject others. This is
+/// the intended UX for friend groups; revisit if a product surface
+/// introduces an explicit owner/admin/member hierarchy.
+const String _kDefaultMemberMode = 'JRWPS';
 
 /// Tinode "eject" pattern: there is no dedicated eject API on
 /// [tinode.Topic]. Setting access mode to None (`'N'`) removes the user
@@ -1479,24 +1492,43 @@ class _ActiveTopic {
 
   void _onMetaSub(tinode.TopicSubscription sub) {
     if (sub.user == null) return;
+    // Tinode routes member adds AND removes through the same
+    // onMetaSub stream — only the resulting access mode tells them
+    // apart. If the sub is marked deleted or the effective mode no
+    // longer has the Join bit, the user has been ejected / has left;
+    // anything else is "joined / membership active." Without this
+    // distinction every mid-life ejection looked like a fresh add to
+    // the host (see BNK-603 phase 7 / BNK-635 / BNK-638 thread).
+    final removed = sub.deleted != null || !_subHasJoin(sub);
     // Fast path: appUserId in public profile.
     String? appUserId;
     if (sub.public != null && sub.public is Map) {
       appUserId = (sub.public as Map)['appUserId'];
     }
     if (appUserId != null && appUserId.isNotEmpty) {
-      _fireMember(appUserId, sub);
+      _fireMember(appUserId, sub, removed: removed);
       return;
     }
     module.config.resolveAppUserId(sub.user!).then((resolved) {
       if (resolved == null) return;
-      _fireMember(resolved, sub);
+      _fireMember(resolved, sub, removed: removed);
     }).catchError((e) {
       module._log('topic($topicId): metaSub resolve error: $e');
     });
   }
 
-  void _fireMember(String appUserId, tinode.TopicSubscription sub) {
+  bool _subHasJoin(tinode.TopicSubscription sub) {
+    final acs = sub.acs;
+    if (acs == null) return true; // unknown — default to "still a member"
+    return (acs.mode & access_mode.JOIN) != 0;
+  }
+
+  void _fireMember(String appUserId, tinode.TopicSubscription sub,
+      {required bool removed}) {
+    if (removed) {
+      module._fire((c) => c.onMemberRemoved?.call(topicId, appUserId));
+      return;
+    }
     final member = types.User(id: appUserId);
     module._fire((c) => c.onMemberAdded?.call(topicId, member));
     final online = sub.online;
