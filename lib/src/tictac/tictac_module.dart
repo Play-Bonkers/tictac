@@ -13,6 +13,7 @@ import 'package:tictac/src/tictac/tictac_config.dart';
 import 'package:tictac/src/tictac/connection_state.dart';
 import 'package:tictac/src/tictac/models/topic.dart' as tictac_models;
 import 'package:tictac/src/tictac/models/topic_type.dart';
+import 'package:tictac/src/tictac/peer_read_state.dart';
 import 'package:tictac/src/tictac/topic_handle.dart';
 import 'package:tictac/src/tictac/voice/voice_callbacks.dart';
 import 'package:tictac/src/tictac/voice/voice_module.dart';
@@ -1401,16 +1402,9 @@ class _ActiveTopic {
   /// a re-mounted UI seed its peer-read state synchronously instead of
   /// waiting for the next live `{info what=read}` from the server.
   int peerReadSeq() {
-    var max = 0;
     final t = module._tinode;
     final selfId = t != null && t.isAuthenticated ? t.userId : null;
-    for (final sub in _topic.subscribers.values) {
-      final r = sub.read;
-      if (r == null || r <= 0) continue;
-      if (selfId != null && sub.user == selfId) continue;
-      if (r > max) max = r;
-    }
-    return max;
+    return PeerReadState.maxPeerRead(_topic.subscribers.values, selfId);
   }
 
   void attach() {
