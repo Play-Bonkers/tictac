@@ -11,6 +11,7 @@ export 'src/tictac/tictac_config.dart' show TicTacConfig;
 export 'src/tictac/tictac_callbacks.dart' show TicTacCallbacks;
 export 'src/tictac/topic_handle.dart' show TopicHandle;
 export 'src/tictac/connection_state.dart' show TicTacConnectionState;
+export 'src/tictac/peer_read_state.dart' show PeerReadState;
 
 // Models (tictac's own types — no Tinode leakage)
 export 'src/tictac/models/topic.dart' show Topic;
