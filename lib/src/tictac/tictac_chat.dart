@@ -7,6 +7,7 @@ import 'package:flutter_chat_ui/src/models/date_header.dart';
 import 'package:flutter_chat_types/flutter_chat_types.dart' as types;
 import 'package:intl/intl.dart';
 import 'package:scroll_to_index/scroll_to_index.dart';
+import 'package:tictac/tinode.dart' as tinode;
 import 'package:uuid/uuid.dart';
 
 import 'message_actions.dart';
@@ -271,13 +272,13 @@ class _TicTacChatState extends State<TicTacChat> {
         if (topicId == widget.topicId) _markTyping(appUserId);
       },
       onMessageRead: (topicId, appUserId, seq) {
-        // _peerReadSeq drives the "seen" tick on OWN messages, which
+        // _peerReadState drives the "seen" tick on OWN messages, which
         // only matters when the reader is NOT us. tictac now fires
         // onMessageRead for self reads as well (so host topic-list
         // caches can track "I've caught up"); filter those out here.
         if (topicId != widget.topicId) return;
         if (appUserId == widget.module.config.appUserId) return;
-        _handleRead(seq);
+        _handleRead(appUserId, seq);
       },
     );
     widget.module.addCallbacks(_ownCallbacks);
@@ -288,11 +289,16 @@ class _TicTacChatState extends State<TicTacChat> {
     final t = await widget.module.joinTopic(widget.topicId);
     if (_disposed) return;
     _topic = t;
-    // Seed the peer-read marker from the topic's cached subscribers so
-    // re-mounted chats can stamp Status.seen on replayed own-messages
-    // without waiting for a live {info what=read}.
-    final seq = t.peerReadSeq();
-    if (seq > _peerReadState.peerReadSeq) _handleRead(seq);
+    // Seed the per-user peer-read map from the topic's cached
+    // subscribers so re-mounted chats can stamp Status.seen on
+    // replayed own-messages without waiting for a live
+    // {info what=read}. Each map entry runs through the same handler
+    // a live event would — keeps the seen-state contract single-pathed.
+    final seqs = await t.peerReadSeqs();
+    if (_disposed) return;
+    for (final entry in seqs.entries) {
+      _handleRead(entry.key, entry.value);
+    }
   }
 
   @override
@@ -363,16 +369,30 @@ class _TicTacChatState extends State<TicTacChat> {
     if (_messages.length != removed) setState(() {});
   }
 
-  // A peer read up to [readSeq] (inclusive). Upgrade our own already-sent
-  // messages at or below that seq to "seen" so flutter_chat_ui renders the
-  // read checkmark. Optimistic placeholders have non-numeric (uuid) ids and
-  // are skipped until their server echo replaces them.
-  void _handleRead(int readSeq) {
+  // Peer [readerAppUserId] read up to [readSeq] (inclusive). Upgrade
+  // our own already-sent messages whose coverage threshold is met to
+  // "seen" so flutter_chat_ui renders the read checkmark. Optimistic
+  // placeholders have non-numeric (uuid) ids and are skipped until
+  // their server echo replaces them.
+  //
+  // Coverage threshold depends on topic type:
+  //   - p2p: any single peer's marker covers (handled by passing
+  //     `requireAllOf: null` to PeerReadState)
+  //   - group: every current non-self member must cover (BNK-593's
+  //     "all members read = blue tick" semantic)
+  void _handleRead(String readerAppUserId, int readSeq) {
     if (_disposed) return;
-    _peerReadState = _peerReadState.recordPeerRead(readSeq).state;
+    final result = _peerReadState.recordPeerRead(readerAppUserId, readSeq);
+    if (!result.changed) return;
+    _peerReadState = result.state;
+    final requireAllOf = _coverageRequireAllOf();
     var changed = false;
     for (var i = 0; i < _messages.length; i++) {
-      final updated = _peerReadState.applyToMessage(_messages[i], _user.id);
+      final updated = _peerReadState.applyToMessage(
+        _messages[i],
+        _user.id,
+        requireAllOf: requireAllOf,
+      );
       if (!identical(updated, _messages[i])) {
         _messages[i] = updated;
         changed = true;
@@ -381,11 +401,29 @@ class _TicTacChatState extends State<TicTacChat> {
     if (changed) setState(() {});
   }
 
-  // Stamp `Status.seen` on own messages already covered by the peer's
-  // read marker. Called on every insert/replace so re-deliveries and
-  // late-arriving data frames don't downgrade to `Status.sent`.
+  // Stamp `Status.seen` on own messages already covered. Called on
+  // every insert/replace so re-deliveries and late-arriving data
+  // frames don't downgrade to `Status.sent`.
   types.Message _applyPeerRead(types.Message msg) =>
-      _peerReadState.applyToMessage(msg, _user.id);
+      _peerReadState.applyToMessage(
+        msg,
+        _user.id,
+        requireAllOf: _coverageRequireAllOf(),
+      );
+
+  /// Returns the set of non-self appUserIds whose markers must all
+  /// cover a message before it's "seen", or `null` for p2p topics
+  /// where any single peer's marker is enough. Computed live from
+  /// [_members] so a mid-life invite/eject shifts the threshold
+  /// without re-mounting the widget.
+  Set<String>? _coverageRequireAllOf() {
+    if (!tinode.Tools.isGroupTopicName(widget.topicId)) return null;
+    final out = <String>{};
+    for (final id in _members.keys) {
+      if (id != _user.id) out.add(id);
+    }
+    return out;
+  }
 
   void _handleMemberAdded(types.User member) {
     if (_members[member.id] != null) return;

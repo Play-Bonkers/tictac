@@ -1407,6 +1407,25 @@ class _ActiveTopic {
     return PeerReadState.maxPeerRead(_topic.subscribers.values, selfId);
   }
 
+  /// Per-member view of [peerReadSeq] keyed by appUserId. Resolves each
+  /// non-self Tinode subscriber to an appUserId via the host's
+  /// resolver; subscribers that don't resolve are dropped silently.
+  Future<Map<String, int>> peerReadSeqs() async {
+    final t = module._tinode;
+    final selfId = t != null && t.isAuthenticated ? t.userId : null;
+    final tinodeKeyed = PeerReadState.peerReadSeqsByUser(
+      _topic.subscribers.values,
+      selfId,
+    );
+    final out = <String, int>{};
+    for (final entry in tinodeKeyed.entries) {
+      final appUid = await module.config.resolveAppUserId(entry.key);
+      if (appUid == null) continue;
+      out[appUid] = entry.value;
+    }
+    return out;
+  }
+
   void attach() {
     _dataSub?.cancel();
     _dataSub = _topic.onData.listen(_onData);
@@ -1703,6 +1722,9 @@ class _TopicHandleImpl implements TopicHandle {
 
   @override
   int peerReadSeq() => _active.peerReadSeq();
+
+  @override
+  Future<Map<String, int>> peerReadSeqs() => _active.peerReadSeqs();
 
   @override
   Future<void> invite(String appUserId) => _active.invite(appUserId);

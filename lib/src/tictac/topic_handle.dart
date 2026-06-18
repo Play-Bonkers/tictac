@@ -48,10 +48,25 @@ abstract class TopicHandle {
   /// be discarded.
   Future<void> leave();
 
-  /// Highest seq the peer (anyone but us) has read, or 0 if unknown. UIs
-  /// rebuilding on mount can use this to seed "seen" state synchronously
-  /// instead of waiting for the next live `{info what=read}`.
+  /// Highest seq any peer has read, or 0 if unknown. UIs rebuilding on
+  /// mount can use this to seed p2p "seen" state synchronously without
+  /// waiting for the next live `{info what=read}`. For groups where
+  /// the host needs per-member visibility (BNK-593's "all members read
+  /// = blue tick"), use [peerReadSeqs] instead — this method only
+  /// surfaces the max and would over-report coverage.
   int peerReadSeq();
+
+  /// Per-member view of [peerReadSeq]. Returns each non-self
+  /// subscriber's read marker keyed by appUserId. Empty map if no peer
+  /// has read anything (e.g. cold mount before the first
+  /// `{info what=read}` lands). Hosts implementing the group "all
+  /// members read" semantic feed this directly into
+  /// `PeerReadState.peerReadSeqByUser`.
+  ///
+  /// Tinode user ids are resolved to appUserIds via
+  /// [TicTacConfig.resolveAppUserId]; unresolved subscribers are
+  /// dropped silently (matches every other resolve site in this SDK).
+  Future<Map<String, int>> peerReadSeqs();
 
   /// Invite an app user to this topic with default member access. Resolves
   /// the appUserId to a Tinode user id via
