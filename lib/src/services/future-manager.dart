@@ -14,6 +14,15 @@ class FutureManager {
 
   Future<dynamic> makeFuture(String id) {
     var completer = Completer();
+    // BNK-637: ensure any rejection is "handled" so that
+    // checkExpiredFutures and rejectAllFutures don't surface
+    // Timeout(504)/disconnect errors as unhandled-zone exceptions
+    // (which the platform dispatcher then prints in a tight loop).
+    // catchError attaches an absorbing listener on a side chain;
+    // legitimate awaiters still see the error through their own
+    // listener on the same completer — Dart Futures fan out to all
+    // registered listeners independently.
+    completer.future.catchError((_) {});
     if (id != null) {
       _pendingFutures[id] = FutureCallback(completer: completer, ts: DateTime.now());
     }

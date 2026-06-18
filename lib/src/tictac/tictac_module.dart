@@ -122,6 +122,28 @@ class TicTacModule {
   bool _awaitingPong = false;
   StreamSubscription? _onNetworkProbeSub;
 
+  // BNK-581 inbound watchdog. Tinode's session idle reaper only resets
+  // its read deadline on WebSocket-protocol Pongs (server/hdl_websock.go
+  // SetPongHandler). Application messages — including tictac's '1'/'0'
+  // probe — don't update lastAction's reaping field. So when the WS
+  // control frames get stripped somewhere upstream (ALB suspected in
+  // dev), the session is reaped at ~55s and the socket sits silent.
+  // The watchdog tracks the last server byte we saw; if we go quieter
+  // than [TicTacConfig.inboundIdleThreshold], something is wrong and
+  // a reconnect is the safe move regardless of root cause.
+  DateTime? _lastInboundAt;
+  StreamSubscription? _onRawMessageSub;
+
+  // BNK-581 app-level keepalive. The '1'/'0' probe is fine for fast
+  // client-side dead detection, but its reply doesn't count as
+  // session activity server-side. Sending a real protocol message
+  // (me.getMeta(withDesc)) every [appKeepaliveInterval] generates an
+  // inbound {meta} reply that keeps the watchdog calm AND validates
+  // the session is actually serving requests — if the reply doesn't
+  // arrive within the SDK's future timeout, we know the session is
+  // dead even before the watchdog window closes.
+  Timer? _appKeepaliveTimer;
+
   // App lifecycle
   DateTime? _backgroundedAt;
 
@@ -603,13 +625,25 @@ class TicTacModule {
   void _startHeartbeat() {
     _stopHeartbeat();
     _awaitingPong = false;
+    _lastInboundAt = DateTime.now();
     _onNetworkProbeSub?.cancel();
     _onNetworkProbeSub = _tinode?.onNetworkProbe.listen((_) {
       _awaitingPong = false;
       _pongTimer?.cancel();
+      _log('Heartbeat: pong received');
+    });
+    // BNK-581: every inbound frame (probe reply, ctrl, meta, data, pres,
+    // info) shows the socket is delivering something. Watchdog reads
+    // this timestamp on its periodic tick.
+    _onRawMessageSub?.cancel();
+    _onRawMessageSub = _tinode?.onRawMessage.listen((_) {
+      _lastInboundAt = DateTime.now();
     });
     _heartbeatTimer =
         Timer.periodic(config.heartbeatInterval, (_) => _sendHeartbeat());
+    _appKeepaliveTimer?.cancel();
+    _appKeepaliveTimer =
+        Timer.periodic(config.appKeepaliveInterval, (_) => _sendAppKeepalive());
   }
 
   void _stopHeartbeat() {
@@ -618,6 +652,11 @@ class TicTacModule {
     _pongTimer?.cancel();
     _pongTimer = null;
     _awaitingPong = false;
+    _appKeepaliveTimer?.cancel();
+    _appKeepaliveTimer = null;
+    _onRawMessageSub?.cancel();
+    _onRawMessageSub = null;
+    _lastInboundAt = null;
   }
 
   void _sendHeartbeat() {
@@ -625,18 +664,66 @@ class TicTacModule {
       _declareDead('Socket not connected');
       return;
     }
+    // BNK-581 watchdog: if we've gone quiet past the configured
+    // threshold the server has almost certainly reaped the session
+    // even though the OS-level socket is still open. Reconnect is
+    // the safe response — see Tinode session research in BNK-581.
+    final last = _lastInboundAt;
+    if (last != null) {
+      final gap = DateTime.now().difference(last);
+      if (gap > config.inboundIdleThreshold) {
+        _declareDead(
+          'Inbound watchdog: no server bytes for ${gap.inSeconds}s '
+          '(threshold ${config.inboundIdleThreshold.inSeconds}s)',
+        );
+        return;
+      }
+    }
     if (_awaitingPong) {
       _declareDead('Previous pong never arrived');
       return;
     }
     try {
       _tinode!.networkProbe();
+      _log('Heartbeat: probe sent');
       _awaitingPong = true;
       _pongTimer =
           Timer(config.pongTimeout, () => _declareDead('Pong timeout'));
     } catch (e) {
       _declareDead('Probe send failed: $e');
     }
+  }
+
+  void _sendAppKeepalive() {
+    final t = _tinode;
+    if (t == null || !t.isConnected) return;
+    // me.getMeta(withDesc) is the cheapest real request available: it
+    // skips data history, doesn't disturb cache, and always returns a
+    // {meta} reply. Failure to resolve (which the SDK surfaces after
+    // expireFuturesTimeout) means the session is reaped — fall through
+    // to _declareDead so reconnect runs even before the inbound
+    // watchdog window closes.
+    () async {
+      try {
+        final me = t.getMeTopic();
+        await me.getMeta(tinode.MetaGetBuilder(me).withDesc(null).build());
+        _log('Heartbeat: app keepalive OK');
+      } catch (e) {
+        // If the socket was torn down between scheduling and the
+        // future resolving, the SDK surfaces the rejection here.
+        // _declareDead in that state would race the reconnect path
+        // and fire a spurious onDisconnected on the old socket.
+        // Only act on this signal if we still believe the socket
+        // is up.
+        if (_tinode == null || !_tinode!.isConnected) {
+          _log('Heartbeat: app keepalive errored after disconnect — '
+              'ignoring ($e)');
+          return;
+        }
+        _log('Heartbeat: app keepalive failed: $e');
+        _declareDead('App keepalive failed: $e');
+      }
+    }();
   }
 
   void _declareDead(String reason) {

@@ -63,6 +63,23 @@ class TicTacConfig {
   /// How long the app can be backgrounded before forcing a reconnect (default: 30s)
   final Duration backgroundReconnectThreshold;
 
+  /// BNK-581: If no inbound frame is received from the server in this
+  /// window, the socket is presumed half-broken (typically because
+  /// Tinode reaped the session after its 55s idle timeout while the
+  /// TCP/WS layer stayed up) and a reconnect is forced. Should be set
+  /// above Tinode's `pongWait` so a healthy session that's just quiet
+  /// doesn't trip it. Default 60s.
+  final Duration inboundIdleThreshold;
+
+  /// BNK-581: Interval at which the module sends a real Tinode protocol
+  /// message (`me.getMeta(withDesc)`) to keep inbound traffic flowing
+  /// and validate that the session is actually serving requests. The
+  /// `'1'`/`'0'` probe is too low-level to update Tinode's session
+  /// bookkeeping; a real `{get}` is what the server treats as activity
+  /// at the dispatch layer (separate from the read-deadline reset
+  /// which only WS-Pong does). Default 30s.
+  final Duration appKeepaliveInterval;
+
   /// Callback that returns the current auth token (e.g. Cognito JWT).
   /// Called on every connect/reconnect to get a fresh token for the websocket
   /// upgrade Authorization header.
@@ -146,6 +163,8 @@ class TicTacConfig {
     this.heartbeatInterval = const Duration(seconds: 12),
     this.pongTimeout = const Duration(seconds: 5),
     this.backgroundReconnectThreshold = const Duration(seconds: 30),
+    this.inboundIdleThreshold = const Duration(seconds: 60),
+    this.appKeepaliveInterval = const Duration(seconds: 30),
     required this.authTokenProvider,
     required this.resolveAppUserId,
     this.resolveTinodeUserIds,
