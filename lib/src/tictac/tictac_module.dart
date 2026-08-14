@@ -951,6 +951,27 @@ class TicTacModule {
     final updated = fresh.where((t) =>
         _knownTopicIds.contains(t.id) && !added.contains(t.id));
     for (final t in updated) {
+      // BNK-686: for groups, replace the light-touch model built from the
+      // me-topic contact sub (empty memberAppUserIds — see
+      // _buildTopicFromSub) with a full snapshot from the SDK's cached
+      // subscribers. Without this, every add-topic tick fires UPDATED for
+      // every existing group with an empty roster and wipes the
+      // composite-of-member-avatars downstream. Skip the emit entirely
+      // when we have no cached roster — better to drop this tick's
+      // unread/name delta than to blank the row until the next warm.
+      if (t.type == TopicType.group) {
+        final refreshed = await _snapshotGroupTopicWithMembers(
+            _tinode!.getTopic(t.id));
+        if (refreshed == null || refreshed.memberAppUserIds.isEmpty) {
+          _log('BNK564 _handleSubsUpdated: SKIP UPDATED ${t.id} — '
+              'group with no cached roster (would wipe members)');
+          continue;
+        }
+        _log('BNK564 _handleSubsUpdated: UPDATED ${t.id} '
+            'with ${refreshed.memberAppUserIds.length} member(s)');
+        _fire((c) => c.onTopicUpdated?.call(refreshed));
+        continue;
+      }
       _log('BNK564 _handleSubsUpdated: UPDATED ${t.id}');
       _fire((c) => c.onTopicUpdated?.call(t));
     }
@@ -1146,6 +1167,24 @@ class TicTacModule {
       _fetchingTopics.remove(topicName);
     }
 
+    // BNK-686: for groups, prefer the full-roster snapshot over the
+    // empty-members model that _buildTopicFromSub would return. Skip the
+    // emit entirely if we have no cached roster — see _handleSubsUpdated
+    // for the same reasoning.
+    final topicKind = tinode.Tools.isGroupTopicName(topicName)
+        ? TopicType.group
+        : TopicType.direct;
+    if (topicKind == TopicType.group) {
+      final refreshed = await _snapshotGroupTopicWithMembers(
+          _tinode!.getTopic(topicName));
+      if (refreshed == null || refreshed.memberAppUserIds.isEmpty) {
+        _log('BNK564 _fetchAndDeliverLatest[$topicName] SKIP onTopicUpdated — '
+            'group with no cached roster (would wipe members)');
+        return;
+      }
+      _fire((c) => c.onTopicUpdated?.call(refreshed));
+      return;
+    }
     final updated = await _buildTopicFromSub(sub);
     if (updated != null) {
       _fire((c) => c.onTopicUpdated?.call(updated));
