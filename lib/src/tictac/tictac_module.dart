@@ -1152,6 +1152,45 @@ class TicTacModule {
     }
   }
 
+  /// BNK-686: build a tictac Topic for a GROUP with the roster the SDK
+  /// just populated in `topic.subscribers` (via a `withSub` fetch).
+  /// Overlays members on top of the me-topic contact sub so the rest of
+  /// the identity (name, unread, touched) matches what _buildTopicFromSub
+  /// would produce — consumers can treat the result as a normal
+  /// onTopicUpdated. Returns null if the group has no me-topic contact
+  /// (should not happen in practice: warm runs off _handleSubsUpdated).
+  Future<tictac_models.Topic?> _snapshotGroupTopicWithMembers(
+      tinode.Topic topic) async {
+    final topicName = topic.name;
+    if (topicName == null) return null;
+    final me = _tinode?.getMeTopic();
+    if (me == null) return null;
+    final sub = me.getContact(topicName);
+    if (sub == null) return null;
+    final base = await _buildTopicFromSub(sub);
+    if (base == null) return null;
+
+    // Resolve every subscriber (tinode uid) to app_user_id. Skip any
+    // that fail to resolve — one broken row shouldn't blank the whole
+    // roster. Order comes from the SDK's Map iteration; consumers don't
+    // depend on member order.
+    final resolved = <String>[];
+    for (final tinodeUid in topic.subscribers.keys) {
+      final appUserId = await config.resolveAppUserId(tinodeUid);
+      if (appUserId != null) resolved.add(appUserId);
+    }
+
+    return tictac_models.Topic(
+      id: base.id,
+      name: base.name,
+      type: base.type,
+      memberAppUserIds: resolved,
+      memberCount: resolved.length,
+      unreadCount: base.unreadCount,
+      lastActivity: base.lastActivity,
+    );
+  }
+
   /// Build a single tictac Topic from a `me` contact subscription — no extra
   /// desc round-trip (uses the cached `fn`), for cheap onTopicUpdated events.
   Future<tictac_models.Topic?> _buildTopicFromSub(
@@ -1219,6 +1258,8 @@ class TicTacModule {
     // just after the subscribe ctrl resolves) and from the topic's cache.
     final collected = <int, tinode.DataMessage>{};
     var subscribedHere = false;
+    // Hoisted so the post-wait group-member emission below can reference it.
+    final isGroup = tinode.Tools.isGroupTopicName(topicName);
     try {
       final topic = t.getTopic(topicName);
       _log('BNK564 _warmTopic[$topicName] getTopic OK '
@@ -1233,12 +1274,14 @@ class TicTacModule {
         // withData(null,null,limit) = latest `scan` messages. (withLaterData is
         // a no-op until a topic has loaded data, so it can't do a fresh fetch.)
         // BNK-686: for group topics also request `sub` so the SDK populates
-        // `topic.memberAppUserIds` on warm. Without this the chat-list row's
+        // `topic.subscribers` on warm. Without this the chat-list row's
         // composite-of-member-avatars renders blank until the user opens the
         // chat (joinTopic runs `withSub` and populates the roster), which is
         // the enter/exit-fixes-it symptom users reported. Mirrors joinTopic's
-        // group-branch query at line ~549.
-        final isGroup = tinode.Tools.isGroupTopicName(topicName);
+        // group-branch query at line ~549. The roster is then handed to
+        // consumers via onTopicUpdated after the wait window below —
+        // _buildTopicFromSub only populates members for P2P, so without an
+        // explicit emit here the sub data would never reach the model.
         final builder =
             tinode.MetaGetBuilder(topic).withData(null, null, scan);
         if (isGroup) {
@@ -1272,6 +1315,25 @@ class TicTacModule {
       for (final d in topic.messages) {
         final seq = d.seq;
         if (seq != null) collected[seq] = d;
+      }
+      // BNK-686: for group topics, emit an onTopicUpdated carrying the
+      // roster the SDK just populated via `withSub`. Without this,
+      // consumers keep the empty memberAppUserIds set by _buildTopicFromSub
+      // (which only fills members for P2P) and any UI that composes an
+      // avatar from group members renders blank until joinTopic runs.
+      // Do this BEFORE leave — the tinode-side sub cache may get torn
+      // down on leave, but subscribers we captured here are already
+      // dispatched.
+      if (isGroup) {
+        final refreshed = await _snapshotGroupTopicWithMembers(topic);
+        if (refreshed != null) {
+          _log('BNK564 _warmTopic[$topicName] emitting onTopicUpdated '
+              'with ${refreshed.memberAppUserIds.length} resolved member(s)');
+          _fire((c) => c.onTopicUpdated?.call(refreshed));
+        } else {
+          _log('BNK564 _warmTopic[$topicName] SKIP member emit — '
+              'no me-topic contact for this group');
+        }
       }
       // Only leave if we did the subscribing in this call AND no one
       // joined this topic in the meantime. Tearing down a sub owned by
