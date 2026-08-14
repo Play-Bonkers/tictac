@@ -1232,18 +1232,30 @@ class TicTacModule {
       try {
         // withData(null,null,limit) = latest `scan` messages. (withLaterData is
         // a no-op until a topic has loaded data, so it can't do a fresh fetch.)
-        final query =
-            tinode.MetaGetBuilder(topic).withData(null, null, scan).build();
+        // BNK-686: for group topics also request `sub` so the SDK populates
+        // `topic.memberAppUserIds` on warm. Without this the chat-list row's
+        // composite-of-member-avatars renders blank until the user opens the
+        // chat (joinTopic runs `withSub` and populates the roster), which is
+        // the enter/exit-fixes-it symptom users reported. Mirrors joinTopic's
+        // group-branch query at line ~549.
+        final isGroup = tinode.Tools.isGroupTopicName(topicName);
+        final builder =
+            tinode.MetaGetBuilder(topic).withData(null, null, scan);
+        if (isGroup) {
+          builder.withSub(null, null, null);
+        }
+        final query = builder.build();
+        final subSuffix = isGroup ? ' + sub' : '';
         if (topic.isSubscribed) {
           // Someone already owns the sub (e.g. createDirectTopic at
           // bootup). Don't re-subscribe — the SDK rejects that. Just
           // pull history via getMeta and leave the existing sub alone.
           _log('BNK564 _warmTopic[$topicName] already subscribed — '
-              'getMeta(withData null,null,$scan)');
+              'getMeta(withData null,null,$scan$subSuffix)');
           await topic.getMeta(query);
         } else {
           _log('BNK564 _warmTopic[$topicName] subscribing with '
-              'withData(null,null,$scan)');
+              'withData(null,null,$scan)$subSuffix');
           await topic.subscribe(query, null);
           subscribedHere = true;
         }
