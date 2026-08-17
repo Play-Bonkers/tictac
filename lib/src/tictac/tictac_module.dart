@@ -35,6 +35,12 @@ import 'package:tictac/src/tictac/voice/voice_session.dart';
 /// the intended UX for friend groups; revisit if a product surface
 /// introduces an explicit owner/admin/member hierarchy.
 const String _kDefaultMemberMode = 'JRWPS';
+/// Full access mode for group owners (Join+Read+Write+Presence+Approve+
+/// Share+Delete+Owner). Matches tinode's default_access.auth. Used to
+/// re-assert the creator's mode after group creation without changing
+/// permissions — the setSub triggers a SubscriptionEvent the sidecar
+/// needs to see (see [BNK-853] in [createGroupTopic]).
+const String _kOwnerMode = 'JRWPASDO';
 
 /// Tinode "eject" pattern: there is no dedicated eject API on
 /// [tinode.Topic]. Setting access mode to None (`'N'`) removes the user
@@ -475,6 +481,26 @@ class TicTacModule {
       tinode.MetaGetBuilder(newTopic).build(),
       setParams,
     );
+
+    // BNK-853: the creator's initial subscription (from the {sub} above)
+    // doesn't reliably emit a SubscriptionEvent tagged with the resolved
+    // grpXXX topic name via tinode's plugin API — the group-membership
+    // sidecar picks up every INVITED member's event but never the
+    // owner's, so the creator never lands in the DDB row msgworker
+    // queries for recipients and never receives group push
+    // notifications. Fire an explicit self-invite (setSub on self) with
+    // the same owner mode we already have — no permission change, but
+    // the event now carries the resolved topic name and the subs cache
+    // upserts the creator like any other subscriber. Best-effort — a
+    // failure only affects push delivery to the creator, not the group
+    // creation itself.
+    try {
+      final selfTinodeUid = _tinode!.getCurrentUserId();
+      await newTopic.invite(selfTinodeUid, _kOwnerMode);
+    } catch (e) {
+      _log('createGroupTopic: self-nudge for push cache failed: $e');
+    }
+
     for (final tinodeUid in tinodeIds) {
       try {
         await newTopic.invite(tinodeUid, _kDefaultMemberMode);
