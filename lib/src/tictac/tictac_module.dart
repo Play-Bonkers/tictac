@@ -532,11 +532,25 @@ class TicTacModule {
 
     final topic = _tinode!.getTopic(topicId);
     final isGroup = tinode.Tools.isGroupTopicName(topicId);
+    // BNK-855: withLaterData is a no-op on a topic with no cached
+    // messages (see comment at _warmTopic below). Chats opened straight
+    // from a notification tap can land here before _handleSubsUpdated's
+    // warm ever ran — the local tinode cache is empty, withLaterData
+    // fetches nothing, and the user sees an empty chat even though the
+    // server has history. Use a fresh withData fetch in that case.
     tinode.MetaGetBuilder builder;
+    final hasCachedMessages = topic.messages.isNotEmpty;
     try {
-      builder = tinode.MetaGetBuilder(topic)
-          .withLaterData(config.recentMessages)
-          .withLaterSub(null);
+      builder = tinode.MetaGetBuilder(topic);
+      if (hasCachedMessages) {
+        builder
+            .withLaterData(config.recentMessages)
+            .withLaterSub(null);
+      } else {
+        builder
+            .withData(null, null, config.recentMessages)
+            .withSub(null, null, null);
+      }
     } on Error {
       builder = tinode.MetaGetBuilder(topic)
           .withData(null, null, config.recentMessages)
@@ -811,11 +825,22 @@ class TicTacModule {
       try {
         final topic = _tinode!.getTopic(topicId);
         if (!topic.isSubscribed) {
+          // BNK-855: same cache-empty guard as joinTopic — on reconnect
+          // after a disconnect the SDK Topic may be a fresh instance
+          // with no messages, and withLaterData would fetch nothing.
           tinode.MetaGetBuilder builder;
+          final hasCachedMessages = topic.messages.isNotEmpty;
           try {
-            builder = tinode.MetaGetBuilder(topic)
-                .withLaterData(config.recentMessages)
-                .withLaterSub(null);
+            builder = tinode.MetaGetBuilder(topic);
+            if (hasCachedMessages) {
+              builder
+                  .withLaterData(config.recentMessages)
+                  .withLaterSub(null);
+            } else {
+              builder
+                  .withData(null, null, config.recentMessages)
+                  .withSub(null, null, null);
+            }
           } on Error {
             builder = tinode.MetaGetBuilder(topic)
                 .withData(null, null, config.recentMessages)
