@@ -35,12 +35,6 @@ import 'package:tictac/src/tictac/voice/voice_session.dart';
 /// the intended UX for friend groups; revisit if a product surface
 /// introduces an explicit owner/admin/member hierarchy.
 const String _kDefaultMemberMode = 'JRWPS';
-/// Full access mode for group owners (Join+Read+Write+Presence+Approve+
-/// Share+Delete+Owner). Matches tinode's default_access.auth. Used to
-/// re-assert the creator's mode after group creation without changing
-/// permissions — the setSub triggers a SubscriptionEvent the sidecar
-/// needs to see (see [BNK-853] in [createGroupTopic]).
-const String _kOwnerMode = 'JRWPASDO';
 
 /// Tinode "eject" pattern: there is no dedicated eject API on
 /// [tinode.Topic]. Setting access mode to None (`'N'`) removes the user
@@ -483,20 +477,27 @@ class TicTacModule {
     );
 
     // BNK-853: the creator's initial subscription (from the {sub} above)
-    // doesn't reliably emit a SubscriptionEvent tagged with the resolved
-    // grpXXX topic name via tinode's plugin API — the group-membership
-    // sidecar picks up every INVITED member's event but never the
-    // owner's, so the creator never lands in the DDB row msgworker
-    // queries for recipients and never receives group push
-    // notifications. Fire an explicit self-invite (setSub on self) with
-    // the same owner mode we already have — no permission change, but
-    // the event now carries the resolved topic name and the subs cache
-    // upserts the creator like any other subscriber. Best-effort — a
-    // failure only affects push delivery to the creator, not the group
-    // creation itself.
+    // doesn't emit a plugin SubscriptionEvent — verified in dev, the
+    // sidecar received exactly N-1 events for an N-member group,
+    // owner missing every time. Without an event, the sidecar's
+    // topic-subs cache never gets the creator's row and msgworker
+    // drops them from every send's recipient list, so the creator
+    // never receives group push. v4.5.4 tried a same-mode self-invite
+    // (setSub with no state change) and it never fired an event either
+    // — tinode dispatches plugin events on actual state changes, not
+    // no-op setSubs. This nudge instead sets a throwaway private-data
+    // field on self's subscription, which IS a state change, so tinode
+    // dispatches a SubscriptionEvent for {topic: grpXXX, user_id: self}
+    // and the sidecar upserts the creator like any other subscriber.
+    // private data is per-subscription opaque metadata — no permission
+    // or visibility side effects. Best-effort — a failure only affects
+    // push delivery to the creator, not the group creation itself.
     try {
-      final selfTinodeUid = _tinode!.getCurrentUserId();
-      await newTopic.invite(selfTinodeUid, _kOwnerMode);
+      await newTopic.setMeta(
+        tinode.SetParams()
+          ..sub = tinode.TopicSubscription(
+              private: {'bnk853Seed': DateTime.now().millisecondsSinceEpoch}),
+      );
     } catch (e) {
       _log('createGroupTopic: self-nudge for push cache failed: $e');
     }
